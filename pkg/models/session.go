@@ -1,6 +1,15 @@
 package models
 
-import "time"
+import (
+	"fmt"
+	"math/rand"
+	"time"
+)
+
+// generateID returns a random 64-bit hex string suitable for use as an ID.
+func generateID() string {
+	return fmt.Sprintf("%016x", rand.Uint64())
+}
 
 // Session represents a user-initiated workflow with session context.
 // It tracks artifacts produced, and provides context for routing decisions.

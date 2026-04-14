@@ -1,0 +1,50 @@
+version: "3.9"
+
+# Build context is the parent dir so the local entroq replace directive resolves.
+x-build: &build
+  build:
+    context: ..
+    dockerfile: agentq/Dockerfile
+
+x-agent: &agent
+  <<: *build
+  depends_on:
+    - eq
+  environment:
+    AGENTQ_EQ_ADDR: eq:37706
+    AGENTQ_LLM_ADDR: http://ollama:11434
+
+services:
+  eq:
+    <<: *build
+    command: ["serve", "--port=37706"]
+    ports:
+      - "37706:37706"
+    volumes:
+      - eq-journal:/data/agentq/journal
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ${OLLAMA_MODELS:-/tmp/agentq-ollama-models}:/root/.ollama
+
+  supervisor:
+    <<: *agent
+    command: ["run", "--agent=supervisor", "--eq-addr=eq:37706"]
+
+  coder:
+    <<: *agent
+    command: ["run", "--agent=coder", "--eq-addr=eq:37706"]
+
+  reviewer:
+    <<: *agent
+    command: ["run", "--agent=reviewer", "--eq-addr=eq:37706"]
+
+  researcher:
+    <<: *agent
+    command: ["run", "--agent=researcher", "--eq-addr=eq:37706"]
+
+volumes:
+  eq-journal:

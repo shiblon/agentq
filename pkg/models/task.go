@@ -7,23 +7,23 @@ import (
 // Task represents a unit of work to be done by an agent.
 // It carries the instruction, session context, and configuration snapshot.
 type Task struct {
-	ID           string            `json:"id"`
-	Queue        string            `json:"queue"`        // target agent queue
-	SessionID    string            `json:"session_id"`   // session context
-	Payload      map[string]any    `json:"payload"`      // instruction/data
-	ConfigRef    *ConfigSnapshot   `json:"config_ref"`   // snapshot of relevant config
-	CreatedAt    time.Time         `json:"created_at"`
-	AttemptCount int               `json:"attempt_count"`
+	ID           string          `json:"id"`
+	Queue        string          `json:"queue"`       // target agent queue
+	SessionURI   string          `json:"session_uri"` // doc: URI for the session in eq
+	Payload      map[string]any  `json:"payload"`     // instruction/data
+	ConfigRef    *ConfigSnapshot `json:"config_ref"`  // snapshot of relevant config
+	CreatedAt    time.Time       `json:"created_at"`
+	AttemptCount int             `json:"attempt_count"`
 }
 
 // NewTask creates a task for a given agent queue.
-func NewTask(queue, sessionID string, payload map[string]any) *Task {
+func NewTask(queue, sessionURI string, payload map[string]any) *Task {
 	return &Task{
-		ID:        generateID(), // we'll define this
-		Queue:     queue,
-		SessionID: sessionID,
-		Payload:   payload,
-		CreatedAt: time.Now(),
+		ID:         generateID(),
+		Queue:      queue,
+		SessionURI: sessionURI,
+		Payload:    payload,
+		CreatedAt:  time.Now(),
 	}
 }
 
