@@ -1,0 +1,21 @@
+{
+  "name": "agentq",
+  "version": "0.1.0",
+  "description": "Agent orchestration on EntroQ",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/cmd/hello.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "entroq": "file:../entroq/clients/js",
+    "pg": "^8.20.0",
+    "tsx": "^4.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/pg": "^8.11.2",
+    "typescript": "^5.3.3"
+  }
+}
