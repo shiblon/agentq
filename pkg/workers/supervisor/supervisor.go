@@ -203,17 +203,19 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 	}
 
 	// Rule guard: small models sometimes skip the "no prior work" rule.
-	hasSpecialistWork := false
+	// Only count fresh (non-inherited) artifacts -- inherited artifacts are
+	// context from a prior session, not work completed in this one.
+	hasFreshWork := false
 	for _, a := range session.Artifacts {
-		if a.AgentName != "supervisor" {
-			hasSpecialistWork = true
+		if a.AgentName != "supervisor" && a.OriginSessionID == "" {
+			hasFreshWork = true
 			break
 		}
 	}
 
-	// If no specialist has run yet, "done" and reviewer-type agents are invalid
-	// first choices (model echoing the example or hallucinating prior work).
-	if !hasSpecialistWork && (d.Next == "done" || s.looksLikeReviewer(d.Next)) {
+	// If no specialist has run yet in this session, "done" and reviewer-type
+	// agents are invalid first choices.
+	if !hasFreshWork && (d.Next == "done" || s.looksLikeReviewer(d.Next)) {
 		kw := s.decideWithKeywords(session)
 		return routeDecision{Next: kw.Next, Reason: "llm rule violation corrected: " + kw.Reason}, nil
 	}
@@ -226,18 +228,34 @@ func buildUserPrompt(session *models.Session) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "User request: %s\n\n", session.Prompt)
 
-	var specialist []models.Artifact
+	var inherited, fresh []models.Artifact
 	for _, a := range session.Artifacts {
-		if a.AgentName != "supervisor" {
-			specialist = append(specialist, a)
+		if a.AgentName == "supervisor" {
+			continue
+		}
+		if a.OriginSessionID != "" {
+			inherited = append(inherited, a)
+		} else {
+			fresh = append(fresh, a)
 		}
 	}
-	if len(specialist) == 0 {
+
+	if len(inherited) == 0 && len(fresh) == 0 {
 		b.WriteString("Work done so far: none.\n")
 	} else {
-		b.WriteString("Work done so far:\n")
-		for _, a := range specialist {
-			fmt.Fprintf(&b, "- [%s/%s] %s\n", a.AgentName, a.Type, a.Content)
+		if len(inherited) > 0 {
+			b.WriteString("Prior session context (inherited):\n")
+			for _, a := range inherited {
+				fmt.Fprintf(&b, "- [%s/%s from session %s] %s\n",
+					a.AgentName, a.Type, a.OriginSessionID, a.Content)
+			}
+			b.WriteString("\n")
+		}
+		if len(fresh) > 0 {
+			b.WriteString("Work done in this session:\n")
+			for _, a := range fresh {
+				fmt.Fprintf(&b, "- [%s/%s] %s\n", a.AgentName, a.Type, a.Content)
+			}
 		}
 	}
 
@@ -261,9 +279,9 @@ func (s *Supervisor) looksLikeReviewer(name string) bool {
 // Matches the prompt against agent descriptions; falls back to the first
 // non-reviewer agent if nothing matches.
 func (s *Supervisor) decideWithKeywords(session *models.Session) routeDecision {
-	// If a specialist has already run, we're done.
+	// If a specialist has already done fresh work in this session, we're done.
 	for _, a := range session.Artifacts {
-		if a.AgentName != "supervisor" {
+		if a.AgentName != "supervisor" && a.OriginSessionID == "" {
 			return routeDecision{Next: "done", Reason: "specialist has completed the work"}
 		}
 	}

@@ -14,14 +14,15 @@ func generateID() string {
 // Session represents a user-initiated workflow with session context.
 // It tracks artifacts produced, and provides context for routing decisions.
 type Session struct {
-	ID        string       `json:"id"`
-	UserID    string       `json:"user_id"`       // who initiated this
-	Prompt    string       `json:"prompt"`        // the initial user request
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
-	Status    string       `json:"status"`        // pending, in_progress, completed, failed
-	Artifacts []Artifact   `json:"artifacts"`     // artifacts produced so far
-	Metadata  map[string]any `json:"metadata"`    // arbitrary session data
+	ID              string         `json:"id"`
+	UserID          string         `json:"user_id"`                    // who initiated this
+	Prompt          string         `json:"prompt"`                     // the initial user request
+	ParentSessionID string         `json:"parent_session_id,omitempty"` // set when continued from another session
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	Status          string         `json:"status"`    // pending, in_progress, completed, failed
+	Artifacts       []Artifact     `json:"artifacts"` // artifacts produced so far
+	Metadata        map[string]any `json:"metadata"`  // arbitrary session data
 }
 
 // NewSession creates a new session for a user prompt.
@@ -41,20 +42,20 @@ func NewSession(userID, prompt string) *Session {
 // Artifact represents a file-based output from an agent.
 // Named: {sessionID}/{timestamp}-{agent}-{type}.{ext}
 type Artifact struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	AgentName string    `json:"agent_name"`
-	Type      string    `json:"type"`        // e.g., "dispatch", "analysis", "feedback"
-	Path      string    `json:"path"`        // relative path in session directory
-	Content   string    `json:"content"`     // for small artifacts, inline
-	CreatedAt time.Time `json:"created_at"`
-	Metadata  map[string]any `json:"metadata"` // agent-specific metadata
+	ID              string         `json:"id"`
+	SessionID       string         `json:"session_id"`
+	OriginSessionID string         `json:"origin_session_id,omitempty"` // set when inherited from a parent session
+	AgentName       string         `json:"agent_name"`
+	Type            string         `json:"type"`    // e.g., "dispatch", "result", "context_summary"
+	Path            string         `json:"path"`    // relative path in session directory
+	Content         string         `json:"content"` // for small artifacts, inline
+	CreatedAt       time.Time      `json:"created_at"`
+	Metadata        map[string]any `json:"metadata"` // agent-specific metadata
 }
 
 // NewArtifact creates an artifact for a session.
 func NewArtifact(sessionID, agentName, artifactType, content string) *Artifact {
 	ts := time.Now()
-	// Path follows the convention: {sessionID}/{timestamp}-{agent}-{type}.md
 	path := formatArtifactPath(sessionID, ts, agentName, artifactType)
 	return &Artifact{
 		ID:        generateID(),
@@ -68,9 +69,35 @@ func NewArtifact(sessionID, agentName, artifactType, content string) *Artifact {
 	}
 }
 
-// formatArtifactPath formats the artifact path.
+// InheritedArtifact creates a copy of an artifact for a new session,
+// preserving the origin session ID for chain inspection.
+func InheritedArtifact(newSessionID string, src Artifact) Artifact {
+	origin := src.OriginSessionID
+	if origin == "" {
+		origin = src.SessionID
+	}
+	ts := time.Now()
+	return Artifact{
+		ID:              generateID(),
+		SessionID:       newSessionID,
+		OriginSessionID: origin,
+		AgentName:       src.AgentName,
+		Type:            src.Type,
+		Path:            formatInheritedPath(newSessionID, origin, ts, src.AgentName, src.Type),
+		Content:         src.Content,
+		CreatedAt:       ts,
+		Metadata:        src.Metadata,
+	}
+}
+
+// formatArtifactPath formats the artifact path for artifacts produced in this session.
 func formatArtifactPath(sessionID string, ts time.Time, agent, aType string) string {
-	// Format: sessions/{sessionID}/{ts}-{agent}-{type}.md
 	tstamp := ts.Format("20060102-150405")
 	return "sessions/" + sessionID + "/" + tstamp + "-" + agent + "-" + aType + ".md"
+}
+
+// formatInheritedPath formats the artifact path for artifacts inherited from a parent session.
+func formatInheritedPath(sessionID, originID string, ts time.Time, agent, aType string) string {
+	tstamp := ts.Format("20060102-150405")
+	return "sessions/" + sessionID + "/inherited/" + originID + "/" + tstamp + "-" + agent + "-" + aType + ".md"
 }
