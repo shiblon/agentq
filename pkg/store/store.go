@@ -158,6 +158,27 @@ func sessionIDFromURI(uri string) (string, error) {
 	return strings.TrimPrefix(uri, prefix), nil
 }
 
+// ListSessions returns up to limit sessions from the store, in key order.
+// The caller can filter or sort the result as needed.
+func (s *Store) ListSessions(ctx context.Context, limit int) ([]*models.Session, error) {
+	docs, err := s.eq.Docs(ctx, &entroq.DocQuery{
+		Namespace: nsSessions,
+		Limit:     limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ListSessions: %w", err)
+	}
+	sessions := make([]*models.Session, 0, len(docs))
+	for _, doc := range docs {
+		s, err := entroq.GetContent[models.Session](doc)
+		if err != nil {
+			continue // skip malformed docs
+		}
+		sessions = append(sessions, &s)
+	}
+	return sessions, nil
+}
+
 // GetSessionByURI retrieves a session using a doc: URI from a Task.
 func (s *Store) GetSessionByURI(ctx context.Context, uri string) (*models.Session, error) {
 	id, err := sessionIDFromURI(uri)
