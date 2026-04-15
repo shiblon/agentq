@@ -202,15 +202,7 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 		return routeDecision{}, fmt.Errorf("llm returned unknown agent %q (raw: %s)", d.Next, raw)
 	}
 
-	// If the reason looks like an unsubstituted example, treat as bad output.
-	if d.Reason == "coder has produced the requested function" || len(strings.Fields(d.Reason)) < 3 {
-		kw := s.decideWithKeywords(session)
-		return routeDecision{Next: kw.Next, Reason: "llm example echo corrected: " + kw.Reason}, nil
-	}
-
 	// Rule guard: small models sometimes skip the "no prior work" rule.
-	// If the LLM wants reviewer/researcher but no specialist has run yet,
-	// fall back to keyword routing.
 	hasSpecialistWork := false
 	for _, a := range session.Artifacts {
 		if a.AgentName != "supervisor" {
@@ -218,9 +210,10 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 			break
 		}
 	}
-	// If no specialist has run yet but the LLM picked a non-first agent
-	// (one with "review" or "check" in its description), fall back to keywords.
-	if !hasSpecialistWork && s.looksLikeReviewer(d.Next) {
+
+	// If no specialist has run yet, "done" and reviewer-type agents are invalid
+	// first choices (model echoing the example or hallucinating prior work).
+	if !hasSpecialistWork && (d.Next == "done" || s.looksLikeReviewer(d.Next)) {
 		kw := s.decideWithKeywords(session)
 		return routeDecision{Next: kw.Next, Reason: "llm rule violation corrected: " + kw.Reason}, nil
 	}
