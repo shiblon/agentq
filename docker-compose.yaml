@@ -17,9 +17,10 @@ x-agent: &agent
 services:
   eq:
     <<: *build
-    command: ["serve", "--port=37706"]
+    command: ["serve", "--port=37706", "--http-port=9100"]
     ports:
       - "37706:37706"
+      - "9100:9100"
     volumes:
       - eq-journal:/data/agentq/journal
 
@@ -45,6 +46,25 @@ services:
   researcher:
     <<: *agent
     command: ["run", "--agent=researcher", "--eq-addr=eq:37706"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - eq
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../entroq/deploy/grafana/provisioning:/etc/grafana/provisioning
+      - ../entroq/deploy/grafana/entroq-dashboard.json:/var/lib/grafana/dashboards/entroq-dashboard.json
+    depends_on:
+      - prometheus
 
 volumes:
   eq-journal:

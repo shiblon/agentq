@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'agentq'
+    static_configs:
+      - targets: ['eq:9100']
