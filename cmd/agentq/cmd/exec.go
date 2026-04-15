@@ -37,12 +37,14 @@ func init() {
 	execCmd.MarkFlagRequired("cmd")
 	execCmd.Flags().String("prompt-file", "", "Path to system prompt file prepended to session context (env: AGENTQ_PROMPT_FILE)")
 	execCmd.Flags().String("reply-queue", "supervisor", "Queue to post results to (env: AGENTQ_REPLY_QUEUE)")
+	execCmd.Flags().String("approval-flag", "", "Suffix appended to cmd when the supervisor grants approval, e.g. --dangerously-skip-permissions")
 
 	viper.BindPFlag("exec_agent", execCmd.Flags().Lookup("agent"))
 	viper.BindPFlag("exec_queue", execCmd.Flags().Lookup("queue"))
 	viper.BindPFlag("exec_cmd", execCmd.Flags().Lookup("cmd"))
 	viper.BindPFlag("prompt_file", execCmd.Flags().Lookup("prompt-file"))
 	viper.BindPFlag("reply_queue", execCmd.Flags().Lookup("reply-queue"))
+	viper.BindPFlag("approval_flag", execCmd.Flags().Lookup("approval-flag"))
 }
 
 func runExecWorker(cmd *cobra.Command, args []string) error {
@@ -51,6 +53,7 @@ func runExecWorker(cmd *cobra.Command, args []string) error {
 	shellCmd := viper.GetString("exec_cmd")
 	promptFile := viper.GetString("prompt_file")
 	replyQueue := viper.GetString("reply_queue")
+	approvalFlag := viper.GetString("approval_flag")
 	eqAddr := viper.GetString("eq_addr")
 
 	ctx := cmd.Context()
@@ -65,6 +68,10 @@ func runExecWorker(cmd *cobra.Command, args []string) error {
 	if promptFile != "" {
 		opts = append(opts, exec.WithPromptFile(promptFile))
 		log.Printf("exec %s: prompt file %q", agentName, promptFile)
+	}
+	if approvalFlag != "" {
+		opts = append(opts, exec.WithApprovalSuffix(approvalFlag))
+		log.Printf("exec %s: approval flag %q", agentName, approvalFlag)
 	}
 
 	w := exec.New(agentName, shellCmd, eq, opts...)

@@ -14,7 +14,8 @@ import (
 )
 
 // buildSystemPrompt constructs the routing prompt from the configured agent list.
-func buildSystemPrompt(agents []config.Agent) string {
+// If a rubric is provided, approval examples are added to the prompt.
+func buildSystemPrompt(agents []config.Agent, rubric string) string {
 	var b strings.Builder
 	b.WriteString("You are a routing supervisor. Output ONLY a single JSON object.\n\n")
 	b.WriteString("Available agents:\n")
@@ -26,19 +27,41 @@ Routing rules:
 - No prior work exists -> dispatch the appropriate specialist for the request.
 - Only use a reviewing/checking agent after a producing agent has already run.
 - Once a specialist has completed the task, use "done".
+- If a specialist reports needing permission to act, consult the approval rubric below.
+`)
+	if rubric != "" {
+		fmt.Fprintf(&b, "\nApproval rubric:\n%s\n", strings.TrimSpace(rubric))
+		b.WriteString(`
+When a specialist reports needing permission:
+- If the rubric allows it: use "re_dispatch" with the agent name and approved_actions.
+- If the rubric requires human sign-off: use "escalate" with the agent name.
+- If the rubric forbids it: use "done" with a note that the action was rejected.
+`)
+	}
 
-Example output (adapt to the actual situation):
+	b.WriteString(`
+Example outputs (adapt to the actual situation):
 {"next": "done", "reason": "coder has produced the requested function"}
-
-Your response must be a JSON object with string fields "next" and "reason". Nothing else.
+`)
+	if rubric != "" {
+		b.WriteString(`{"next": "re_dispatch", "agent": "coder", "approved_actions": ["write_files"], "reason": "writing to workspace is allowed per rubric"}
+{"next": "escalate", "agent": "coder", "reason": "package install requires human review per rubric"}
+`)
+	}
+	b.WriteString(`
+Required fields: "next" (string), "reason" (string).
+Optional: "agent" (string, for re_dispatch/escalate), "approved_actions" (array of strings, for re_dispatch).
+Your response must be a JSON object with these fields only. Nothing else.
 `)
 	return b.String()
 }
 
 // routeDecision is the JSON shape the LLM must produce.
 type routeDecision struct {
-	Next   string `json:"next"`
-	Reason string `json:"reason"`
+	Next            string   `json:"next"`
+	Reason          string   `json:"reason"`
+	Agent           string   `json:"agent,omitempty"`            // for re_dispatch and escalate
+	ApprovedActions []string `json:"approved_actions,omitempty"` // for re_dispatch
 }
 
 // Supervisor is the trampoline orchestrator. It accepts a task, consults the
@@ -49,6 +72,7 @@ type Supervisor struct {
 	config *models.AgentConfig
 	llm    llm.Client
 	agents []config.Agent
+	rubric string
 }
 
 // Option is a functional option for configuring a Supervisor.
@@ -99,13 +123,33 @@ func WithAgents(agents []config.Agent) Option {
 	}
 }
 
-// ProcessTask handles an incoming supervisor task.
-// It loads the session, asks the LLM for the next step, then either
-// enqueues a specialist task or marks the session complete.
+// WithRubric sets the approval policy text included in the supervisor's system
+// prompt. It describes which agent actions can be auto-approved, which require
+// human review, and which are rejected. Only meaningful when an LLM is configured.
+func WithRubric(rubric string) Option {
+	return func(s *Supervisor) { s.rubric = rubric }
+}
+
+// ProcessTask handles an incoming supervisor task. It peeks at the message
+// type to distinguish normal dispatches from human-review replies.
 func (s *Supervisor) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
+	var header struct {
+		Type string `json:"type"`
+	}
+	// Ignore unmarshal error -- missing type field is fine, defaults to "".
+	json.Unmarshal(task.Value, &header) //nolint:errcheck
+	if header.Type == "review_reply" {
+		return s.handleReviewReply(ctx, task)
+	}
+	return s.handleDispatch(ctx, task)
+}
+
+// handleDispatch processes a normal agent task: loads the session, decides
+// the next step, and returns the appropriate queue modifications.
+func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
 	var appTask models.Task
 	if err := json.Unmarshal(task.Value, &appTask); err != nil {
-		return nil, fmt.Errorf("ProcessTask: unmarshal task: %w", err)
+		return nil, fmt.Errorf("handleDispatch: unmarshal task: %w", err)
 	}
 
 	sessionID := appTask.SessionURI[len("doc:sessions/"):]
@@ -117,43 +161,172 @@ func (s *Supervisor) ProcessTask(ctx context.Context, task *entroq.Task) ([]entr
 		if err != nil {
 			return err
 		}
-
-		artifact := models.NewArtifact(
-			session.ID,
-			"supervisor",
-			"dispatch",
-			fmt.Sprintf("next=%s reason=%s", decision.Next, decision.Reason),
-		)
-		session.Artifacts = append(session.Artifacts, *artifact)
-
-		if decision.Next == "done" {
+		session.Artifacts = append(session.Artifacts, *s.dispatchArtifact(session.ID, decision))
+		switch decision.Next {
+		case "done":
 			session.Status = "completed"
-		} else {
+		case "escalate":
+			session.Status = "awaiting_review"
+		default:
 			session.Status = "in_progress"
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("ProcessTask: update session: %w", err)
+		return nil, fmt.Errorf("handleDispatch: update session: %w", err)
 	}
 
 	mods := []entroq.ModifyArg{task.Delete()}
 
-	if decision.Next != "done" {
-		outputQueue := s.config.GetOutputQueue(decision.Next)
-		if outputQueue == "" {
-			return nil, fmt.Errorf("no output queue configured for agent: %s", decision.Next)
+	switch decision.Next {
+	case "done":
+		// Nothing more to enqueue.
+
+	case "re_dispatch":
+		outQueue := s.config.GetOutputQueue(decision.Agent)
+		if outQueue == "" {
+			return nil, fmt.Errorf("re_dispatch: no queue for agent %q", decision.Agent)
 		}
-		childTask := models.NewTask(outputQueue, appTask.SessionURI, map[string]any{
+		child := models.NewTask(outQueue, appTask.SessionURI, map[string]any{
+			"agent":            decision.Agent,
+			"approved_actions": decision.ApprovedActions,
+		})
+		childBytes, err := json.Marshal(child)
+		if err != nil {
+			return nil, fmt.Errorf("marshal re_dispatch task: %w", err)
+		}
+		mods = append(mods, entroq.InsertingInto(outQueue, entroq.WithRawValue(childBytes)))
+
+	case "escalate":
+		// Build a review request. Load the session to get the last specialist
+		// artifact as context for the reviewer.
+		var summary string
+		if reviewSession, err := s.store.GetSession(ctx, sessionID); err == nil {
+			latest := latestFreshByAgent(reviewSession)
+			if a, ok := latest[decision.Agent]; ok {
+				summary = truncate(a.Content, 500)
+			}
+		}
+		req := &models.HumanReviewRequest{
+			SessionURI:      appTask.SessionURI,
+			RequestingAgent: decision.Agent,
+			Reason:          decision.Reason,
+			ReplyQueue:      "supervisor",
+			ContextSummary:  summary,
+		}
+		reqBytes, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("marshal review request: %w", err)
+		}
+		mods = append(mods, entroq.InsertingInto("human_review", entroq.WithRawValue(reqBytes)))
+
+	default:
+		// Normal agent dispatch.
+		outQueue := s.config.GetOutputQueue(decision.Next)
+		if outQueue == "" {
+			return nil, fmt.Errorf("no output queue for agent %q", decision.Next)
+		}
+		child := models.NewTask(outQueue, appTask.SessionURI, map[string]any{
 			"agent": decision.Next,
 		})
-		childBytes, err := json.Marshal(childTask)
+		childBytes, err := json.Marshal(child)
 		if err != nil {
 			return nil, fmt.Errorf("marshal child task for %s: %w", decision.Next, err)
 		}
-		mods = append(mods, entroq.InsertingInto(outputQueue, entroq.WithRawValue(childBytes)))
+		mods = append(mods, entroq.InsertingInto(outQueue, entroq.WithRawValue(childBytes)))
 	}
 
 	return mods, nil
+}
+
+// handleReviewReply processes a HumanReviewReply that arrives in the
+// supervisor queue. It re-dispatches (if approved) or closes the session.
+func (s *Supervisor) handleReviewReply(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
+	var reply models.HumanReviewReply
+	if err := json.Unmarshal(task.Value, &reply); err != nil {
+		return nil, fmt.Errorf("handleReviewReply: unmarshal: %w", err)
+	}
+
+	sessionID := reply.SessionURI[len("doc:sessions/"):]
+
+	// Find the agent that was escalated by reading the last escalate artifact.
+	agentName, err := s.lastEscalatedAgent(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("handleReviewReply: %w", err)
+	}
+
+	mods := []entroq.ModifyArg{task.Delete()}
+
+	switch reply.Outcome {
+	case "approved":
+		outQueue := s.config.GetOutputQueue(agentName)
+		if outQueue == "" {
+			return nil, fmt.Errorf("handleReviewReply: no queue for agent %q", agentName)
+		}
+		// Record the approval in the session.
+		if err := s.store.UpdateSession(ctx, sessionID, func(session *models.Session) error {
+			artifact := models.NewArtifact(session.ID, "supervisor", "approval",
+				fmt.Sprintf("human approved %s; input: %s", agentName, reply.HumanInput))
+			session.Artifacts = append(session.Artifacts, *artifact)
+			session.Status = "in_progress"
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("handleReviewReply: record approval: %w", err)
+		}
+		child := models.NewTask(outQueue, reply.SessionURI, map[string]any{
+			"agent":            agentName,
+			"approved_actions": []string{"all"},
+			"human_input":      reply.HumanInput,
+		})
+		childBytes, err := json.Marshal(child)
+		if err != nil {
+			return nil, fmt.Errorf("marshal approved task: %w", err)
+		}
+		mods = append(mods, entroq.InsertingInto(outQueue, entroq.WithRawValue(childBytes)))
+
+	default: // "rejected" or anything unexpected
+		if err := s.store.UpdateSession(ctx, sessionID, func(session *models.Session) error {
+			artifact := models.NewArtifact(session.ID, "supervisor", "rejection",
+				fmt.Sprintf("human rejected %s: %s", agentName, reply.HumanInput))
+			session.Artifacts = append(session.Artifacts, *artifact)
+			session.Status = "completed"
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("handleReviewReply: record rejection: %w", err)
+		}
+	}
+
+	return mods, nil
+}
+
+// dispatchArtifact creates a supervisor dispatch artifact with JSON content
+// so it can be parsed by later supervisor turns.
+func (s *Supervisor) dispatchArtifact(sessionID string, d routeDecision) *models.Artifact {
+	content, _ := json.Marshal(d)
+	return models.NewArtifact(sessionID, "supervisor", "dispatch", string(content))
+}
+
+// lastEscalatedAgent scans session artifacts (newest first) for the most
+// recent supervisor/dispatch artifact whose decision was "escalate", and
+// returns the agent named in that decision.
+func (s *Supervisor) lastEscalatedAgent(ctx context.Context, sessionID string) (string, error) {
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("lastEscalatedAgent: %w", err)
+	}
+	for i := len(session.Artifacts) - 1; i >= 0; i-- {
+		a := session.Artifacts[i]
+		if a.AgentName != "supervisor" || a.Type != "dispatch" {
+			continue
+		}
+		var d routeDecision
+		if err := json.Unmarshal([]byte(a.Content), &d); err != nil {
+			continue
+		}
+		if d.Next == "escalate" && d.Agent != "" {
+			return d.Agent, nil
+		}
+	}
+	return "", fmt.Errorf("no escalate dispatch found in session %s", sessionID)
 }
 
 // decide asks the LLM (or falls back to keyword matching) which agent to invoke next.
@@ -168,7 +341,7 @@ func (s *Supervisor) decide(ctx context.Context, session *models.Session) (route
 func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session) (routeDecision, error) {
 	userPrompt := buildUserPrompt(session)
 
-	raw, err := s.llm.Complete(ctx, buildSystemPrompt(s.agents), userPrompt)
+	raw, err := s.llm.Complete(ctx, buildSystemPrompt(s.agents, s.rubric), userPrompt)
 	if err != nil {
 		return routeDecision{}, fmt.Errorf("llm routing: %w", err)
 	}
@@ -185,16 +358,14 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 	var d routeDecision
 	if err := json.Unmarshal([]byte(text), &d); err != nil {
 		// Small models sometimes echo the context instead of emitting JSON.
-		// If a specialist has already produced output, the safest fallback is done.
-		for _, a := range session.Artifacts {
-			if a.AgentName != "supervisor" {
-				return routeDecision{Next: "done", Reason: "llm parse failed; specialist work exists"}, nil
-			}
+		// If a specialist has already produced real output, safest fallback is done.
+		if hasFreshCompletedWork(session) {
+			return routeDecision{Next: "done", Reason: "llm parse failed; specialist work exists"}, nil
 		}
 		return routeDecision{}, fmt.Errorf("parse llm response %q: %w", raw, err)
 	}
 
-	valid := map[string]bool{"done": true}
+	valid := map[string]bool{"done": true, "re_dispatch": true, "escalate": true}
 	for _, a := range s.agents {
 		valid[a.Name] = true
 	}
@@ -203,19 +374,8 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 	}
 
 	// Rule guard: small models sometimes skip the "no prior work" rule.
-	// Only count fresh (non-inherited) artifacts -- inherited artifacts are
-	// context from a prior session, not work completed in this one.
-	hasFreshWork := false
-	for _, a := range session.Artifacts {
-		if a.AgentName != "supervisor" && a.OriginSessionID == "" {
-			hasFreshWork = true
-			break
-		}
-	}
-
-	// If no specialist has run yet in this session, "done" and reviewer-type
-	// agents are invalid first choices.
-	if !hasFreshWork && (d.Next == "done" || s.looksLikeReviewer(d.Next)) {
+	// Only fresh completed work (not permission requests, not inherited) counts.
+	if !hasFreshCompletedWork(session) && (d.Next == "done" || s.looksLikeReviewer(d.Next)) {
 		kw := s.decideWithKeywords(session)
 		return routeDecision{Next: kw.Next, Reason: "llm rule violation corrected: " + kw.Reason}, nil
 	}
@@ -276,14 +436,27 @@ func (s *Supervisor) looksLikeReviewer(name string) bool {
 }
 
 // decideWithKeywords is the fallback when no LLM is configured.
-// Matches the prompt against agent descriptions; falls back to the first
-// non-reviewer agent if nothing matches.
+// Matches the prompt against agent descriptions; auto-approves permission
+// requests; falls back to the first non-reviewer agent if nothing matches.
 func (s *Supervisor) decideWithKeywords(session *models.Session) routeDecision {
-	// If a specialist has already done fresh work in this session, we're done.
-	for _, a := range session.Artifacts {
-		if a.AgentName != "supervisor" && a.OriginSessionID == "" {
-			return routeDecision{Next: "done", Reason: "specialist has completed the work"}
+	latest := latestFreshByAgent(session)
+
+	// Check if any agent's most recent artifact is a permission request.
+	// If so, auto-approve (keyword mode is for development/testing).
+	for agentName, a := range latest {
+		if looksLikePermissionRequest(a.Content) {
+			return routeDecision{
+				Next:            "re_dispatch",
+				Agent:           agentName,
+				Reason:          "auto-approving permission request (keyword mode)",
+				ApprovedActions: []string{"all"},
+			}
 		}
+	}
+
+	// If a specialist has already done fresh completed work, we're done.
+	if len(latest) > 0 {
+		return routeDecision{Next: "done", Reason: "specialist has completed the work"}
 	}
 
 	lower := strings.ToLower(session.Prompt)
@@ -308,4 +481,52 @@ func (s *Supervisor) decideWithKeywords(session *models.Session) routeDecision {
 	}
 
 	return routeDecision{Next: "done", Reason: "no agents configured"}
+}
+
+// latestFreshByAgent returns the most recent non-inherited, non-supervisor
+// artifact for each agent name. Later entries in the slice overwrite earlier ones.
+func latestFreshByAgent(session *models.Session) map[string]models.Artifact {
+	result := make(map[string]models.Artifact)
+	for _, a := range session.Artifacts {
+		if a.AgentName == "supervisor" || a.OriginSessionID != "" {
+			continue
+		}
+		result[a.AgentName] = a
+	}
+	return result
+}
+
+// hasFreshCompletedWork returns true if any agent has a most-recent fresh
+// artifact that does NOT look like a permission request.
+func hasFreshCompletedWork(session *models.Session) bool {
+	for _, a := range latestFreshByAgent(session) {
+		if !looksLikePermissionRequest(a.Content) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikePermissionRequest returns true if the artifact content suggests
+// the agent is blocked waiting for tool-use or action approval.
+func looksLikePermissionRequest(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "needs permission") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "needs approval") ||
+		strings.Contains(lower, "tool-use approval") ||
+		strings.Contains(lower, "waiting for permission") ||
+		strings.Contains(lower, "approve the file") ||
+		strings.Contains(lower, "approve the write") ||
+		strings.Contains(content, `"needs_review": true`) ||
+		strings.Contains(content, `"needs_approval": true`)
+}
+
+// truncate returns s truncated to at most n runes, appending "..." if cut.
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
 }

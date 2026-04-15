@@ -48,7 +48,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 	defer eq.Close()
 
-	cfg, agents, err := loadSupervisorConfig(agentName, configFile)
+	cfg, agents, rubric, err := loadSupervisorConfig(agentName, configFile)
 	if err != nil {
 		return err
 	}
@@ -63,31 +63,31 @@ func runAgent(cmd *cobra.Command, args []string) error {
 
 	log.Printf("agent %s starting, claiming from queue %q", agentName, cfg.InputQueue)
 
-	return claimLoop(ctx, eq, cfg, agentName, llmClient, agents)
+	return claimLoop(ctx, eq, cfg, agentName, llmClient, agents, rubric)
 }
 
-// loadSupervisorConfig returns an AgentConfig and the full agent list for the
-// supervisor, loaded from the config file. For non-supervisor agents it falls
-// back to the hardcoded mock configs (they don't need the agent list).
-func loadSupervisorConfig(name, configFile string) (*models.AgentConfig, []config.Agent, error) {
+// loadSupervisorConfig returns an AgentConfig, the full agent list, and the
+// rubric for the supervisor, loaded from the config file. For non-supervisor
+// agents it falls back to the hardcoded mock configs (they don't need these).
+func loadSupervisorConfig(name, configFile string) (*models.AgentConfig, []config.Agent, string, error) {
 	if name != "supervisor" {
 		cfg := hardcodedConfig(name)
 		if cfg == nil {
-			return nil, nil, fmt.Errorf("unknown agent: %q", name)
+			return nil, nil, "", fmt.Errorf("unknown agent: %q", name)
 		}
-		return cfg, nil, nil
+		return cfg, nil, "", nil
 	}
 
 	cfg, err := config.Load(configFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load agents config: %w", err)
+		return nil, nil, "", fmt.Errorf("load agents config: %w", err)
 	}
 
 	supCfg := &models.AgentConfig{
 		Name:       "supervisor",
 		InputQueue: "supervisor",
 	}
-	return supCfg, cfg.Agents, nil
+	return supCfg, cfg.Agents, cfg.Rubric, nil
 }
 
 // hardcodedConfig returns a mock AgentConfig for non-supervisor built-in agents.
@@ -105,7 +105,7 @@ func hardcodedConfig(name string) *models.AgentConfig {
 }
 
 // claimLoop runs a simple claim-process-modify loop for the given agent.
-func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent) error {
+func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent, rubric string) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -120,7 +120,7 @@ func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, 
 			continue
 		}
 
-		mods, err := dispatch(ctx, eq, cfg, agentName, llmClient, agents, task)
+		mods, err := dispatch(ctx, eq, cfg, agentName, llmClient, agents, rubric, task)
 		if err != nil {
 			log.Printf("agent %s: process error (attempt %d): %v", agentName, task.Attempt+1, err)
 			mods = []entroq.ModifyArg{retryMod(task, err.Error())}
@@ -133,7 +133,7 @@ func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, 
 }
 
 // dispatch routes a claimed task to the appropriate handler.
-func dispatch(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent, task *entroq.Task) ([]entroq.ModifyArg, error) {
+func dispatch(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent, rubric string, task *entroq.Task) ([]entroq.ModifyArg, error) {
 	switch agentName {
 	case "supervisor":
 		opts := []supervisor.Option{
@@ -142,6 +142,9 @@ func dispatch(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, a
 		}
 		if llmClient != nil {
 			opts = append(opts, supervisor.WithLLM(llmClient))
+		}
+		if rubric != "" {
+			opts = append(opts, supervisor.WithRubric(rubric))
 		}
 		sup := supervisor.New(eq, opts...)
 		return sup.ProcessTask(ctx, task)

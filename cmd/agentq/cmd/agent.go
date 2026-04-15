@@ -53,6 +53,7 @@ func init() {
 	agentAddCmd.Flags().String("description", "", "One-line description used by supervisor for routing (required)")
 	agentAddCmd.Flags().String("prompt-file", "", "Path to system prompt file (optional)")
 	agentAddCmd.Flags().String("cmd", "", "Shell command to run for each task (optional, required for exec workers)")
+	agentAddCmd.Flags().String("approval-flag", "", "Suffix appended to cmd when supervisor grants approval, e.g. --dangerously-skip-permissions")
 	agentAddCmd.MarkFlagRequired("name")
 	agentAddCmd.MarkFlagRequired("queue")
 	agentAddCmd.MarkFlagRequired("description")
@@ -73,13 +74,15 @@ func runAgentAdd(cmd *cobra.Command, args []string) error {
 	desc, _ := cmd.Flags().GetString("description")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
 	agentCmd, _ := cmd.Flags().GetString("cmd")
+	approvalFlag, _ := cmd.Flags().GetString("approval-flag")
 
 	if err := cfg.Add(config.Agent{
-		Name:        name,
-		Queue:       queue,
-		Description: desc,
-		PromptFile:  promptFile,
-		Cmd:         agentCmd,
+		Name:           name,
+		Queue:          queue,
+		Description:    desc,
+		PromptFile:     promptFile,
+		Cmd:            agentCmd,
+		ApprovalSuffix: approvalFlag,
 	}); err != nil {
 		return err
 	}
@@ -160,6 +163,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	if a.PromptFile != "" {
 		opts = append(opts, exec.WithPromptFile(a.PromptFile))
 		log.Printf("agent %s: prompt file %q", name, a.PromptFile)
+	}
+	if a.ApprovalSuffix != "" {
+		opts = append(opts, exec.WithApprovalSuffix(a.ApprovalSuffix))
+		log.Printf("agent %s: approval suffix %q", name, a.ApprovalSuffix)
 	}
 
 	w := exec.New(name, a.Cmd, eq, opts...)

@@ -16,8 +16,22 @@ type HumanReviewRequest struct {
 // human has acted. The receiving agent uses outcome and human_input to decide
 // how to continue the session.
 type HumanReviewReply struct {
+	// Type is always "review_reply". The supervisor uses this to distinguish
+	// review replies from normal dispatch tasks in the same queue.
+	Type         string `json:"type"`
 	SessionURI   string `json:"session_uri"`    // same as the original request
 	Outcome      string `json:"outcome"`        // "approved", "rejected", "input_provided"
 	HumanInput   string `json:"human_input"`    // free-form text from the human
 	ReviewTaskID string `json:"review_task_id"` // ID of the human_review task that was handled
+}
+
+// NewReviewReply constructs a HumanReviewReply with the Type field pre-set.
+func NewReviewReply(sessionURI, outcome, humanInput, reviewTaskID string) *HumanReviewReply {
+	return &HumanReviewReply{
+		Type:         "review_reply",
+		SessionURI:   sessionURI,
+		Outcome:      outcome,
+		HumanInput:   humanInput,
+		ReviewTaskID: reviewTaskID,
+	}
 }

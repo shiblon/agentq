@@ -10,15 +10,22 @@ import (
 
 // Agent defines a specialist agent persona.
 type Agent struct {
-	Name        string `yaml:"name"`
-	Queue       string `yaml:"queue"`
-	Description string `yaml:"description"`
-	PromptFile  string `yaml:"prompt_file,omitempty"`
-	Cmd         string `yaml:"cmd,omitempty"`
+	Name           string `yaml:"name"`
+	Queue          string `yaml:"queue"`
+	Description    string `yaml:"description"`
+	PromptFile     string `yaml:"prompt_file,omitempty"`
+	Cmd            string `yaml:"cmd,omitempty"`
+	// ApprovalSuffix is appended to Cmd when the task carries approved_actions.
+	// For "claude --print" workers, set this to "--dangerously-skip-permissions".
+	ApprovalSuffix string `yaml:"approval_suffix,omitempty"`
 }
 
 // Config is the top-level structure of agents.yaml.
 type Config struct {
+	// Rubric is the approval policy text passed to the supervisor's system
+	// prompt. It describes which agent actions can be auto-approved, which
+	// require human review, and which are always rejected.
+	Rubric string  `yaml:"rubric,omitempty"`
 	Agents []Agent `yaml:"agents"`
 }
 

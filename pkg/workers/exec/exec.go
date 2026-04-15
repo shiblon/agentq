@@ -21,11 +21,12 @@ import (
 // Worker claims tasks from a queue, runs an external command for each one,
 // and appends the command's stdout as an artifact to the session.
 type Worker struct {
-	name       string
-	cmd        string // shell command, executed via sh -c
-	promptFile string // path to system prompt file (optional)
-	replyQueue string // queue to re-enqueue to after completion
-	store      *store.Store
+	name           string
+	cmd            string // shell command, executed via sh -c
+	promptFile     string // path to system prompt file (optional)
+	replyQueue     string // queue to re-enqueue to after completion
+	approvalSuffix string // appended to cmd when task carries approved_actions
+	store          *store.Store
 }
 
 // Option is a functional option for Worker.
@@ -41,6 +42,13 @@ func WithPromptFile(path string) Option {
 // Defaults to "supervisor".
 func WithReplyQueue(q string) Option {
 	return func(w *Worker) { w.replyQueue = q }
+}
+
+// WithApprovalSuffix sets a string appended to the shell command when the
+// incoming task carries an approved_actions payload. For "claude --print"
+// workers, set this to "--dangerously-skip-permissions".
+func WithApprovalSuffix(s string) Option {
+	return func(w *Worker) { w.approvalSuffix = s }
 }
 
 // New creates an exec Worker. cmd is a shell command string (run via sh -c).
@@ -68,6 +76,13 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 
 	sessionID := appTask.SessionURI[len("doc:sessions/"):]
 
+	// If the task carries approved_actions and we have an approval suffix,
+	// append it to the command so the subprocess runs with elevated permissions.
+	cmd := w.cmd
+	if w.approvalSuffix != "" && hasApproval(appTask.Payload) {
+		cmd = w.cmd + " " + w.approvalSuffix
+	}
+
 	session, err := w.store.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: get session: %w", w.name, err)
@@ -80,7 +95,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 
 	input := buildInput(systemPrompt, session)
 
-	output, err := w.runCmd(ctx, input)
+	output, err := w.runCmd(ctx, cmd, input)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: %w", w.name, err)
 	}
@@ -118,8 +133,8 @@ func (w *Worker) loadPrompt() (string, error) {
 	return string(data), nil
 }
 
-func (w *Worker) runCmd(ctx context.Context, input string) (string, error) {
-	cmd := osexec.CommandContext(ctx, "sh", "-c", w.cmd)
+func (w *Worker) runCmd(ctx context.Context, shellCmd, input string) (string, error) {
+	cmd := osexec.CommandContext(ctx, "sh", "-c", shellCmd)
 	cmd.Stdin = strings.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -128,6 +143,17 @@ func (w *Worker) runCmd(ctx context.Context, input string) (string, error) {
 		return "", fmt.Errorf("command %q failed: %w\nstderr: %s", w.cmd, err, stderr.String())
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// hasApproval reports whether the task payload contains a non-empty
+// approved_actions list, indicating the supervisor granted elevated permissions.
+func hasApproval(payload map[string]any) bool {
+	v, ok := payload["approved_actions"]
+	if !ok || v == nil {
+		return false
+	}
+	actions, ok := v.([]interface{})
+	return ok && len(actions) > 0
 }
 
 // buildInput composes the full prompt passed to the subprocess on stdin.
