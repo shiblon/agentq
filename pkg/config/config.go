@@ -10,14 +10,14 @@ import (
 
 // Agent defines a specialist agent persona.
 type Agent struct {
-	Name           string `yaml:"name"`
-	Queue          string `yaml:"queue"`
-	Description    string `yaml:"description"`
-	PromptFile     string `yaml:"prompt_file,omitempty"`
-	Cmd            string `yaml:"cmd,omitempty"`
+	Name           string `yaml:"name"            json:"name"`
+	Queue          string `yaml:"queue"           json:"queue"`
+	Description    string `yaml:"description"     json:"description"`
+	PromptFile     string `yaml:"prompt_file,omitempty"    json:"prompt_file,omitempty"`
+	Cmd            string `yaml:"cmd,omitempty"            json:"cmd,omitempty"`
 	// ApprovalSuffix is appended to Cmd when the task carries approved_actions.
 	// For "claude --print" workers, set this to "--dangerously-skip-permissions".
-	ApprovalSuffix string `yaml:"approval_suffix,omitempty"`
+	ApprovalSuffix string `yaml:"approval_suffix,omitempty" json:"approval_suffix,omitempty"`
 }
 
 // Config is the top-level structure of agents.yaml.
@@ -25,8 +25,8 @@ type Config struct {
 	// Rubric is the approval policy text passed to the supervisor's system
 	// prompt. It describes which agent actions can be auto-approved, which
 	// require human review, and which are always rejected.
-	Rubric string  `yaml:"rubric,omitempty"`
-	Agents []Agent `yaml:"agents"`
+	Rubric string  `yaml:"rubric,omitempty" json:"rubric,omitempty"`
+	Agents []Agent `yaml:"agents"           json:"agents"`
 }
 
 // Load reads a Config from a YAML file. Returns an empty Config if the file
