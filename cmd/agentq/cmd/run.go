@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/llm"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/workers/mock"
@@ -37,6 +38,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	eqAddr := viper.GetString("eq_addr")
 	llmAddr := viper.GetString("llm_addr")
 	llmModel := viper.GetString("llm_model")
+	configFile := viper.GetString("config")
 
 	ctx := cmd.Context()
 
@@ -46,9 +48,9 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 	defer eq.Close()
 
-	cfg := agentConfig(agentName)
-	if cfg == nil {
-		return fmt.Errorf("unknown agent: %q (known: supervisor, coder, reviewer, researcher)", agentName)
+	cfg, agents, err := loadSupervisorConfig(agentName, configFile)
+	if err != nil {
+		return err
 	}
 
 	var llmClient llm.Client
@@ -61,14 +63,36 @@ func runAgent(cmd *cobra.Command, args []string) error {
 
 	log.Printf("agent %s starting, claiming from queue %q", agentName, cfg.InputQueue)
 
-	return claimLoop(ctx, eq, cfg, agentName, llmClient)
+	return claimLoop(ctx, eq, cfg, agentName, llmClient, agents)
 }
 
-// agentConfig returns the hardcoded AgentConfig for a named agent.
-func agentConfig(name string) *models.AgentConfig {
+// loadSupervisorConfig returns an AgentConfig and the full agent list for the
+// supervisor, loaded from the config file. For non-supervisor agents it falls
+// back to the hardcoded mock configs (they don't need the agent list).
+func loadSupervisorConfig(name, configFile string) (*models.AgentConfig, []config.Agent, error) {
+	if name != "supervisor" {
+		cfg := hardcodedConfig(name)
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("unknown agent: %q", name)
+		}
+		return cfg, nil, nil
+	}
+
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load agents config: %w", err)
+	}
+
+	supCfg := &models.AgentConfig{
+		Name:       "supervisor",
+		InputQueue: "supervisor",
+	}
+	return supCfg, cfg.Agents, nil
+}
+
+// hardcodedConfig returns a mock AgentConfig for non-supervisor built-in agents.
+func hardcodedConfig(name string) *models.AgentConfig {
 	switch name {
-	case "supervisor":
-		return models.SupervisorAgent()
 	case "coder":
 		return models.CoderAgent()
 	case "reviewer":
@@ -81,7 +105,7 @@ func agentConfig(name string) *models.AgentConfig {
 }
 
 // claimLoop runs a simple claim-process-modify loop for the given agent.
-func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client) error {
+func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -96,7 +120,7 @@ func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, 
 			continue
 		}
 
-		mods, err := dispatch(ctx, eq, cfg, agentName, llmClient, task)
+		mods, err := dispatch(ctx, eq, cfg, agentName, llmClient, agents, task)
 		if err != nil {
 			log.Printf("agent %s: process error: %v", agentName, err)
 			// On error, just release (delete without doing anything else).
@@ -110,11 +134,12 @@ func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, 
 }
 
 // dispatch routes a claimed task to the appropriate handler.
-func dispatch(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, task *entroq.Task) ([]entroq.ModifyArg, error) {
+func dispatch(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, agentName string, llmClient llm.Client, agents []config.Agent, task *entroq.Task) ([]entroq.ModifyArg, error) {
 	switch agentName {
 	case "supervisor":
 		opts := []supervisor.Option{
 			supervisor.WithConfig(func(c *models.AgentConfig) { *c = *cfg }),
+			supervisor.WithAgents(agents),
 		}
 		if llmClient != nil {
 			opts = append(opts, supervisor.WithLLM(llmClient))

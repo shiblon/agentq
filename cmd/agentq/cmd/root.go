@@ -25,7 +25,9 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().String("eq-addr", "localhost:37706", "entroq gRPC server address")
+	rootCmd.PersistentFlags().String("config", "agents.yaml", "Path to agents config file (env: AGENTQ_CONFIG)")
 	viper.BindPFlag("eq_addr", rootCmd.PersistentFlags().Lookup("eq-addr"))
+	viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 }
 
 func initConfig() {

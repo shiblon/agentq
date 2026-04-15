@@ -6,28 +6,34 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/llm"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/entroq"
 )
 
-// systemPrompt tells the LLM how to act as a routing supervisor.
-const systemPrompt = `You are a routing supervisor. Output ONLY a single JSON object.
-
-Available agents: coder, reviewer, researcher.
-
+// buildSystemPrompt constructs the routing prompt from the configured agent list.
+func buildSystemPrompt(agents []config.Agent) string {
+	var b strings.Builder
+	b.WriteString("You are a routing supervisor. Output ONLY a single JSON object.\n\n")
+	b.WriteString("Available agents:\n")
+	for _, a := range agents {
+		fmt.Fprintf(&b, "- %s: %s\n", a.Name, a.Description)
+	}
+	b.WriteString(`
 Routing rules:
-- No prior work exists + code request -> next: coder
-- No prior work exists + research request -> next: researcher
-- Specialist has already produced output + task complete -> next: done
-- Only use reviewer after coder or researcher has already produced output.
+- No prior work exists -> dispatch the appropriate specialist for the request.
+- Only use a reviewing/checking agent after a producing agent has already run.
+- Once a specialist has completed the task, use "done".
 
 Example output (adapt to the actual situation):
 {"next": "done", "reason": "coder has produced the requested function"}
 
 Your response must be a JSON object with string fields "next" and "reason". Nothing else.
-`
+`)
+	return b.String()
+}
 
 // routeDecision is the JSON shape the LLM must produce.
 type routeDecision struct {
@@ -42,6 +48,7 @@ type Supervisor struct {
 	store  *store.Store
 	config *models.AgentConfig
 	llm    llm.Client
+	agents []config.Agent
 }
 
 // Option is a functional option for configuring a Supervisor.
@@ -72,6 +79,23 @@ func WithConfig(fn func(*models.AgentConfig)) Option {
 func WithLLM(c llm.Client) Option {
 	return func(s *Supervisor) {
 		s.llm = c
+	}
+}
+
+// WithAgents sets the known specialist agents for dynamic prompt building
+// and route validation. Also populates the output queue map on the config.
+func WithAgents(agents []config.Agent) Option {
+	return func(s *Supervisor) {
+		s.agents = agents
+		if s.config == nil {
+			s.config = &models.AgentConfig{}
+		}
+		if s.config.OutputQueues == nil {
+			s.config.OutputQueues = make(map[string]string)
+		}
+		for _, a := range agents {
+			s.config.OutputQueues[a.Name] = a.Queue
+		}
 	}
 }
 
@@ -144,7 +168,7 @@ func (s *Supervisor) decide(ctx context.Context, session *models.Session) (route
 func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session) (routeDecision, error) {
 	userPrompt := buildUserPrompt(session)
 
-	raw, err := s.llm.Complete(ctx, systemPrompt, userPrompt)
+	raw, err := s.llm.Complete(ctx, buildSystemPrompt(s.agents), userPrompt)
 	if err != nil {
 		return routeDecision{}, fmt.Errorf("llm routing: %w", err)
 	}
@@ -170,7 +194,10 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 		return routeDecision{}, fmt.Errorf("parse llm response %q: %w", raw, err)
 	}
 
-	valid := map[string]bool{"coder": true, "reviewer": true, "researcher": true, "done": true}
+	valid := map[string]bool{"done": true}
+	for _, a := range s.agents {
+		valid[a.Name] = true
+	}
 	if !valid[d.Next] {
 		return routeDecision{}, fmt.Errorf("llm returned unknown agent %q (raw: %s)", d.Next, raw)
 	}
@@ -191,7 +218,9 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 			break
 		}
 	}
-	if !hasSpecialistWork && (d.Next == "reviewer" || d.Next == "researcher") {
+	// If no specialist has run yet but the LLM picked a non-first agent
+	// (one with "review" or "check" in its description), fall back to keywords.
+	if !hasSpecialistWork && s.looksLikeReviewer(d.Next) {
 		kw := s.decideWithKeywords(session)
 		return routeDecision{Next: kw.Next, Reason: "llm rule violation corrected: " + kw.Reason}, nil
 	}
@@ -223,23 +252,49 @@ func buildUserPrompt(session *models.Session) string {
 	return b.String()
 }
 
-// decideWithKeywords is the fallback when no LLM is configured.
-func (s *Supervisor) decideWithKeywords(session *models.Session) routeDecision {
-	lower := strings.ToLower(session.Prompt)
+// looksLikeReviewer returns true if the named agent's description suggests it
+// should only run after another specialist (contains "review" or "check").
+func (s *Supervisor) looksLikeReviewer(name string) bool {
+	for _, a := range s.agents {
+		if a.Name == name {
+			desc := strings.ToLower(a.Description)
+			return strings.Contains(desc, "review") || strings.Contains(desc, "check")
+		}
+	}
+	return false
+}
 
-	// If there are already artifacts from a specialist, we're done.
+// decideWithKeywords is the fallback when no LLM is configured.
+// Matches the prompt against agent descriptions; falls back to the first
+// non-reviewer agent if nothing matches.
+func (s *Supervisor) decideWithKeywords(session *models.Session) routeDecision {
+	// If a specialist has already run, we're done.
 	for _, a := range session.Artifacts {
 		if a.AgentName != "supervisor" {
 			return routeDecision{Next: "done", Reason: "specialist has completed the work"}
 		}
 	}
 
-	switch {
-	case strings.Contains(lower, "research") || strings.Contains(lower, "investigate"):
-		return routeDecision{Next: "researcher", Reason: "prompt requests research"}
-	case strings.Contains(lower, "review") || strings.Contains(lower, "check"):
-		return routeDecision{Next: "reviewer", Reason: "prompt requests a review"}
-	default:
-		return routeDecision{Next: "coder", Reason: "default: route to coder"}
+	lower := strings.ToLower(session.Prompt)
+
+	// Try to match a non-reviewer agent by description keywords.
+	for _, a := range s.agents {
+		if s.looksLikeReviewer(a.Name) {
+			continue
+		}
+		for _, word := range strings.Fields(strings.ToLower(a.Description)) {
+			if len(word) >= 4 && strings.Contains(lower, word) {
+				return routeDecision{Next: a.Name, Reason: "keyword match on description: " + word}
+			}
+		}
 	}
+
+	// Default to the first non-reviewer agent.
+	for _, a := range s.agents {
+		if !s.looksLikeReviewer(a.Name) {
+			return routeDecision{Next: a.Name, Reason: "default: first available specialist"}
+		}
+	}
+
+	return routeDecision{Next: "done", Reason: "no agents configured"}
 }
