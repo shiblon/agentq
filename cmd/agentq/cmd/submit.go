@@ -2,12 +2,10 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 
-	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
+	"github.com/shiblon/agentq/pkg/workflow"
 	"github.com/shiblon/entroq"
 	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
@@ -48,50 +46,11 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	}
 	defer eq.Close()
 
-	return submitSession(ctx, eq, userID, prompt, continueFrom, compact)
-}
-
-// submitSession creates a session doc and enqueues a supervisor task for it.
-func submitSession(ctx context.Context, eq *entroq.EntroQ, userID, prompt, continueFrom string, compact bool) error {
 	st := store.New(eq)
-
-	session := models.NewSession(userID, prompt)
-
-	if continueFrom != "" {
-		parent, err := st.GetSession(ctx, continueFrom)
-		if err != nil {
-			return fmt.Errorf("load parent session %s: %w", continueFrom, err)
-		}
-		session.ParentSessionID = continueFrom
-		if compact {
-			session.Metadata["compact_inherited"] = true
-		}
-		for _, a := range parent.Artifacts {
-			// Skip supervisor dispatch artifacts -- they're routing decisions,
-			// not useful work for the next session's context.
-			if a.AgentName == "supervisor" {
-				continue
-			}
-			session.Artifacts = append(session.Artifacts, models.InheritedArtifact(session.ID, a))
-		}
-		log.Printf("continuing from session %s: inherited %d artifact(s)", continueFrom, len(session.Artifacts))
-	}
-
-	if err := st.PutSession(ctx, session); err != nil {
-		return fmt.Errorf("create session: %w", err)
-	}
-
-	sessionURI := store.SessionURI(session.ID)
-	task := models.NewTask("supervisor", sessionURI, nil)
-	taskBytes, err := json.Marshal(task)
+	result, err := workflow.SubmitSession(ctx, st, eq, userID, prompt, continueFrom, compact)
 	if err != nil {
-		return fmt.Errorf("marshal task: %w", err)
+		return err
 	}
-
-	if _, err := eq.Modify(ctx, entroq.InsertingInto("supervisor", entroq.WithRawValue(taskBytes))); err != nil {
-		return fmt.Errorf("enqueue supervisor task: %w", err)
-	}
-
-	log.Printf("submitted session %s -> %s", session.ID, sessionURI)
+	_ = result // session ID already logged by workflow
 	return nil
 }
