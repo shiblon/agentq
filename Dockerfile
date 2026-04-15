@@ -1,6 +1,6 @@
 # Build context is the parent directory so the local entroq replace directive works.
 # docker build -f agentq/Dockerfile ..
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 ENV CGO_ENABLED=0
 WORKDIR /src

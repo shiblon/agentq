@@ -95,10 +95,27 @@ All agentq services use the same published image. The role is determined by the 
 
 ```
 agentq serve --port=<port>      # eq server
-agentq run --agent=<name>       # worker (one process per agent name)
+agentq run --agent=<name>       # built-in worker (supervisor, or mock agents)
+agentq exec --agent=<name> \
+  --queue=<queue> \
+  --cmd="<cli command>" \
+  --prompt-file=<path>          # worker that delegates to an external CLI
 agentq submit --prompt="..."    # submit a task (testing / scripting)
 agentq inspect <session-id>     # print session state as JSON
 ```
+
+`agentq exec` is the recommended way to run real agent personas. It claims
+tasks, builds context from the session, and pipes it to any CLI tool via stdin,
+capturing stdout as the result artifact. Two common patterns:
+
+- **Claude CLI** (no API account needed): `--cmd "claude --print"`
+  Works well for individual or small-team deployments. The worker runs as the
+  user who owns the Claude CLI session.
+
+- **API client script** (recommended for multi-worker deployments):
+  `--cmd "python3 scripts/call_api.py"` or similar. More appropriate when
+  running many workers in parallel, where per-user CLI sessions would be
+  awkward.
 
 (To build from source instead, see the appendix at the end of this document.)
 
@@ -138,9 +155,8 @@ config/prompts/coder.txt
 config/prompts/reviewer.txt
 ```
 
-Mount these into the container (or bake them into the image) and reference
-them via the `AGENTQ_PROMPT_<NAME>` environment variable or the
-`--prompt-file` flag (both map to the same viper key `prompt_<name>`).
+Mount these into the container (or bake them into the image) and pass the
+path via the `--prompt-file` flag on `agentq exec`.
 
 The supervisor's routing system prompt is internal to agentq and does not
 need a file.

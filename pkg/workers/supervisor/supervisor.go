@@ -13,20 +13,20 @@ import (
 )
 
 // systemPrompt tells the LLM how to act as a routing supervisor.
-const systemPrompt = `You are an orchestration supervisor for a multi-agent system.
+const systemPrompt = `You are a routing supervisor. Output ONLY a single JSON object.
 
-Available agents:
-- coder      : writes and edits code
-- reviewer   : reviews code or written output for correctness and quality
-- researcher : searches for information, investigates questions, summarizes findings
+Available agents: coder, reviewer, researcher.
 
-Your job: given the original user request and the work done so far, decide which
-agent to invoke next -- or declare the task done.
+Routing rules:
+- No prior work exists + code request -> next: coder
+- No prior work exists + research request -> next: researcher
+- Specialist has already produced output + task complete -> next: done
+- Only use reviewer after coder or researcher has already produced output.
 
-Respond with exactly one JSON object and nothing else:
-{"next": "<agent_name_or_done>", "reason": "<one brief sentence>"}
+Example output (adapt to the actual situation):
+{"next": "done", "reason": "coder has produced the requested function"}
 
-Valid values for "next": coder, reviewer, researcher, done.
+Your response must be a JSON object with string fields "next" and "reason". Nothing else.
 `
 
 // routeDecision is the JSON shape the LLM must produce.
@@ -160,12 +160,40 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 
 	var d routeDecision
 	if err := json.Unmarshal([]byte(text), &d); err != nil {
+		// Small models sometimes echo the context instead of emitting JSON.
+		// If a specialist has already produced output, the safest fallback is done.
+		for _, a := range session.Artifacts {
+			if a.AgentName != "supervisor" {
+				return routeDecision{Next: "done", Reason: "llm parse failed; specialist work exists"}, nil
+			}
+		}
 		return routeDecision{}, fmt.Errorf("parse llm response %q: %w", raw, err)
 	}
 
 	valid := map[string]bool{"coder": true, "reviewer": true, "researcher": true, "done": true}
 	if !valid[d.Next] {
 		return routeDecision{}, fmt.Errorf("llm returned unknown agent %q (raw: %s)", d.Next, raw)
+	}
+
+	// If the reason looks like an unsubstituted example, treat as bad output.
+	if d.Reason == "coder has produced the requested function" || len(strings.Fields(d.Reason)) < 3 {
+		kw := s.decideWithKeywords(session)
+		return routeDecision{Next: kw.Next, Reason: "llm example echo corrected: " + kw.Reason}, nil
+	}
+
+	// Rule guard: small models sometimes skip the "no prior work" rule.
+	// If the LLM wants reviewer/researcher but no specialist has run yet,
+	// fall back to keyword routing.
+	hasSpecialistWork := false
+	for _, a := range session.Artifacts {
+		if a.AgentName != "supervisor" {
+			hasSpecialistWork = true
+			break
+		}
+	}
+	if !hasSpecialistWork && (d.Next == "reviewer" || d.Next == "researcher") {
+		kw := s.decideWithKeywords(session)
+		return routeDecision{Next: kw.Next, Reason: "llm rule violation corrected: " + kw.Reason}, nil
 	}
 
 	return d, nil
@@ -176,11 +204,17 @@ func buildUserPrompt(session *models.Session) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "User request: %s\n\n", session.Prompt)
 
-	if len(session.Artifacts) == 0 {
+	var specialist []models.Artifact
+	for _, a := range session.Artifacts {
+		if a.AgentName != "supervisor" {
+			specialist = append(specialist, a)
+		}
+	}
+	if len(specialist) == 0 {
 		b.WriteString("Work done so far: none.\n")
 	} else {
 		b.WriteString("Work done so far:\n")
-		for _, a := range session.Artifacts {
+		for _, a := range specialist {
 			fmt.Fprintf(&b, "- [%s/%s] %s\n", a.AgentName, a.Type, a.Content)
 		}
 	}
