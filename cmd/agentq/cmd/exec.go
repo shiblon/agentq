@@ -81,8 +81,8 @@ func runExecWorker(cmd *cobra.Command, args []string) error {
 		}
 		mods, err := w.ProcessTask(ctx, task)
 		if err != nil {
-			log.Printf("exec %s: process error: %v", agentName, err)
-			mods = []entroq.ModifyArg{task.Delete()}
+			log.Printf("exec %s: process error (attempt %d): %v", agentName, task.Attempt+1, err)
+			mods = []entroq.ModifyArg{retryMod(task, err.Error())}
 		}
 		if _, err := eq.Modify(ctx, mods...); err != nil {
 			log.Printf("exec %s: modify error: %v", agentName, err)

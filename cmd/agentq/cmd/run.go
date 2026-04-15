@@ -122,9 +122,8 @@ func claimLoop(ctx context.Context, eq *entroq.EntroQ, cfg *models.AgentConfig, 
 
 		mods, err := dispatch(ctx, eq, cfg, agentName, llmClient, agents, task)
 		if err != nil {
-			log.Printf("agent %s: process error: %v", agentName, err)
-			// On error, just release (delete without doing anything else).
-			mods = []entroq.ModifyArg{task.Delete()}
+			log.Printf("agent %s: process error (attempt %d): %v", agentName, task.Attempt+1, err)
+			mods = []entroq.ModifyArg{retryMod(task, err.Error())}
 		}
 
 		if _, err := eq.Modify(ctx, mods...); err != nil {

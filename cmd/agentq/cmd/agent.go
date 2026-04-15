@@ -179,8 +179,8 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		}
 		mods, err := w.ProcessTask(ctx, task)
 		if err != nil {
-			log.Printf("agent %s: process error: %v", name, err)
-			mods = []entroq.ModifyArg{task.Delete()}
+			log.Printf("agent %s: process error (attempt %d): %v", name, task.Attempt+1, err)
+			mods = []entroq.ModifyArg{retryMod(task, err.Error())}
 		}
 		if _, err := eq.Modify(ctx, mods...); err != nil {
 			log.Printf("agent %s: modify error: %v", name, err)
