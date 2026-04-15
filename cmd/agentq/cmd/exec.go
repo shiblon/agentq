@@ -20,7 +20,10 @@ pipes it to an external command via stdin, and appends stdout as an artifact.
 Example:
   agentq exec --agent coder --queue coder_queue \
     --prompt-file config/prompts/coder.txt \
-    --cmd "claude --print"`,
+    --cmd "claude --print --dangerously-skip-permissions"
+
+Note: when using "claude --print" as the command, pass --dangerously-skip-permissions
+so that Claude does not pause to ask for tool-use approval mid-task.`,
 	RunE: runExecWorker,
 }
 
