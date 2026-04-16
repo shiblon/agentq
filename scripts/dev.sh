@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$(dirname "$0")/.."
+REPO_ROOT="$PWD"
 EQ_ADDR="${AGENTQ_EQ_ADDR:-localhost:37706}"
 API_ADDR="${AGENTQ_API_ADDR:-:8080}"
 API_PORT="${API_ADDR##*:}"
@@ -28,7 +29,7 @@ pids=()
 cleanup() {
   echo ""
   echo "Shutting down..."
-  for pid in "${pids[@]}"; do
+  for pid in "${pids[@]+"${pids[@]}"}"; do
     kill "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
@@ -37,7 +38,8 @@ trap cleanup EXIT INT TERM
 
 # Build agentq.
 echo "Building agentq..."
-go build -o "$REPO_ROOT/agentq" "$REPO_ROOT/cmd/agentq"
+cd "$REPO_ROOT"
+go build -o "$REPO_ROOT/agentq" ./cmd/agentq
 
 # Install web dependencies if needed.
 if [ ! -d "$REPO_ROOT/web/node_modules" ]; then
