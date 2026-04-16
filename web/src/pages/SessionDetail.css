@@ -1,0 +1,122 @@
+.btn-back {
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0;
+}
+
+.chain-nav {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.chain-item {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.chain-item.active {
+  background: var(--color-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.session-prompt {
+  font-size: 1.05rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+}
+
+.session-meta {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-bottom: 1.25rem;
+}
+
+.link {
+  cursor: pointer;
+  color: var(--color-accent);
+}
+
+.artifacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.artifact-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.artifact-card.inherited {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.artifact-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 6px 12px;
+  background: var(--color-hover);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.8rem;
+}
+
+.artifact-agent {
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.artifact-origin {
+  color: var(--color-muted);
+  font-style: italic;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.artifact-type {
+  color: var(--color-muted);
+  margin-left: auto;
+}
+
+.artifact-time {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
+.artifact-content {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.artifact-toggle {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-hover);
+  color: var(--color-accent);
+  padding: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}

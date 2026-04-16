@@ -1,0 +1,17 @@
+# config/agents.yaml -- example agent configuration.
+# Copy and adapt this file, then run:
+#   ./agentq run --config config/agents.yaml
+
+# rubric: tells the supervisor when it can auto-approve tool-use requests,
+# when to escalate for human review, and what to always reject.
+rubric: |
+  Auto-approve read-only actions: file reads, directory listings, web searches.
+  Escalate any request to write files, run shell commands, or modify the environment.
+  Always reject requests to delete files or run commands with destructive flags.
+
+agents:
+  - name: coder
+    queue: coder_queue
+    description: Writes, reads, and edits code based on a task description.
+    cmd: claude --print
+    approval_suffix: --dangerously-skip-permissions

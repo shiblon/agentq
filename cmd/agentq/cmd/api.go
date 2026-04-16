@@ -36,13 +36,16 @@ Endpoints:
 func init() {
 	rootCmd.AddCommand(apiCmd)
 	apiCmd.Flags().String("addr", ":8080", "Address to listen on (env: AGENTQ_API_ADDR)")
+	apiCmd.Flags().String("static-dir", "", "Serve web UI static files from this directory (e.g. web/dist)")
 	viper.BindPFlag("api_addr", apiCmd.Flags().Lookup("addr"))
+	viper.BindPFlag("api_static_dir", apiCmd.Flags().Lookup("static-dir"))
 }
 
 func runAPI(cmd *cobra.Command, args []string) error {
 	addr := viper.GetString("api_addr")
 	eqAddr := viper.GetString("eq_addr")
 	configFile := viper.GetString("config")
+	staticDir := viper.GetString("api_static_dir")
 
 	ctx := cmd.Context()
 
@@ -52,7 +55,12 @@ func runAPI(cmd *cobra.Command, args []string) error {
 	}
 	defer eq.Close()
 
-	srv := agentqapi.New(eq, configFile)
+	var opts []agentqapi.Option
+	if staticDir != "" {
+		opts = append(opts, agentqapi.WithStaticDir(staticDir))
+		log.Printf("serving web UI from %s", staticDir)
+	}
+	srv := agentqapi.New(eq, configFile, opts...)
 	log.Printf("api server listening on %s", addr)
 	return http.ListenAndServe(addr, srv.Handler())
 }

@@ -1,0 +1,54 @@
+.submit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.submit-textarea {
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.submit-textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.filter-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+
+.filter-tab {
+  padding: 4px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.filter-tab:hover,
+.filter-tab.active {
+  background: var(--color-hover);
+  color: var(--color-text);
+  border-color: var(--color-text);
+}
+
+.col-prompt { max-width: 480px; word-break: break-word; }
+.col-num    { text-align: right; width: 80px; }
+.col-age    { white-space: nowrap; width: 100px; color: var(--color-muted); }

@@ -4,10 +4,37 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/workflow"
 )
+
+// sessionSummary is the shape returned by the list endpoint.
+// Artifact content is excluded -- fetch the full session by ID to get it.
+type sessionSummary struct {
+	ID              string         `json:"id"`
+	UserID          string         `json:"user_id"`
+	Prompt          string         `json:"prompt"`
+	ParentSessionID string         `json:"parent_session_id,omitempty"`
+	Status          string         `json:"status"`
+	ArtifactCount   int            `json:"artifact_count"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+}
+
+func summarize(s *models.Session) sessionSummary {
+	return sessionSummary{
+		ID:              s.ID,
+		UserID:          s.UserID,
+		Prompt:          s.Prompt,
+		ParentSessionID: s.ParentSessionID,
+		Status:          s.Status,
+		ArtifactCount:   len(s.Artifacts),
+		CreatedAt:       s.CreatedAt,
+		UpdatedAt:       s.UpdatedAt,
+	}
+}
 
 // submitRequest is the body for POST /api/v1/sessions.
 type submitRequest struct {
@@ -40,17 +67,15 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if statusFilter != "" {
-		filtered := sessions[:0]
-		for _, s := range sessions {
-			if s.Status == statusFilter {
-				filtered = append(filtered, s)
-			}
+	summaries := make([]sessionSummary, 0, len(sessions))
+	for _, s := range sessions {
+		if statusFilter != "" && s.Status != statusFilter {
+			continue
 		}
-		sessions = filtered
+		summaries = append(summaries, summarize(s))
 	}
 
-	writeJSON(w, http.StatusOK, sessions)
+	writeJSON(w, http.StatusOK, summaries)
 }
 
 func (s *Server) handleSessionsSubmit(w http.ResponseWriter, r *http.Request) {
