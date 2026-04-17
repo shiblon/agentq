@@ -41,6 +41,7 @@ type submitRequest struct {
 	Prompt       string `json:"prompt"`
 	UserID       string `json:"user_id"`
 	ContinueFrom string `json:"continue_from"`
+	Repo         string `json:"repo"`
 	Compact      bool   `json:"compact"`
 }
 
@@ -92,7 +93,7 @@ func (s *Server) handleSessionsSubmit(w http.ResponseWriter, r *http.Request) {
 		req.UserID = "api"
 	}
 
-	result, err := workflow.SubmitSession(r.Context(), s.store, s.eq, req.UserID, req.Prompt, req.ContinueFrom, req.Compact)
+	result, err := workflow.SubmitSession(r.Context(), s.store, s.eq, req.UserID, req.Prompt, req.ContinueFrom, req.Repo, req.Compact)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("submit session: %v", err))
 		return

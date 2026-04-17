@@ -24,11 +24,13 @@ func init() {
 	submitCmd.Flags().String("user", "cli", "User ID to associate with the session")
 	submitCmd.Flags().String("continue-from", "", "Session ID to inherit artifacts from")
 	submitCmd.Flags().Bool("compact", false, "Ask the supervisor to compact inherited artifacts on first turn")
+	submitCmd.Flags().String("repo", "", "Workspace repo path for agents to work in (e.g. github.com/shiblon/agentq)")
 	submitCmd.MarkFlagRequired("prompt")
 	viper.BindPFlag("prompt", submitCmd.Flags().Lookup("prompt"))
 	viper.BindPFlag("user", submitCmd.Flags().Lookup("user"))
 	viper.BindPFlag("continue_from", submitCmd.Flags().Lookup("continue-from"))
 	viper.BindPFlag("compact", submitCmd.Flags().Lookup("compact"))
+	viper.BindPFlag("submit_repo", submitCmd.Flags().Lookup("repo"))
 }
 
 func runSubmit(cmd *cobra.Command, args []string) error {
@@ -37,6 +39,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	eqAddr := viper.GetString("eq_addr")
 	continueFrom, _ := cmd.Flags().GetString("continue-from")
 	compact, _ := cmd.Flags().GetBool("compact")
+	repo := viper.GetString("submit_repo")
 
 	ctx := context.Background()
 
@@ -47,7 +50,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	defer eq.Close()
 
 	st := store.New(eq)
-	result, err := workflow.SubmitSession(ctx, st, eq, userID, prompt, continueFrom, compact)
+	result, err := workflow.SubmitSession(ctx, st, eq, userID, prompt, continueFrom, repo, compact)
 	if err != nil {
 		return err
 	}

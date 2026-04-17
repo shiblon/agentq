@@ -59,6 +59,7 @@ export interface SubmitRequest {
   prompt: string;
   user_id?: string;
   continue_from?: string;
+  repo?: string;
   compact?: boolean;
 }
 

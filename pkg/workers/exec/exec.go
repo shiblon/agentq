@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
+	"github.com/shiblon/agentq/pkg/workspace"
 	"github.com/shiblon/entroq"
 )
 
@@ -23,9 +25,11 @@ import (
 type Worker struct {
 	name           string
 	cmd            string // shell command, executed via sh -c
-	promptFile     string // path to system prompt file (optional)
+	promptFile     string // path to system prompt file (optional); overridden by workspace
 	replyQueue     string // queue to re-enqueue to after completion
 	approvalSuffix string // appended to cmd when task carries approved_actions
+	ws             *workspace.Workspace // if set, manages working dir and prompt loading
+	commitWork     bool                 // if true, commit + push after each task
 	store          *store.Store
 }
 
@@ -49,6 +53,20 @@ func WithReplyQueue(q string) Option {
 // workers, set this to "--dangerously-skip-permissions".
 func WithApprovalSuffix(s string) Option {
 	return func(w *Worker) { w.approvalSuffix = s }
+}
+
+// WithWorkspace attaches a Workspace to the worker. Before each task the
+// worker pulls the self repo and loads the agent's system prompt from it.
+// The working directory is set to the session's target repo (from session
+// metadata key "workspace_repo"), cloning it first if absent.
+func WithWorkspace(ws *workspace.Workspace) Option {
+	return func(w *Worker) { w.ws = ws }
+}
+
+// WithCommitWork instructs the worker to git-commit and push any changes in
+// the target repo after each task completes. Requires WithWorkspace.
+func WithCommitWork(commit bool) Option {
+	return func(w *Worker) { w.commitWork = commit }
 }
 
 // New creates an exec Worker. cmd is a shell command string (run via sh -c).
@@ -88,16 +106,40 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 		return nil, fmt.Errorf("exec %s: get session: %w", w.name, err)
 	}
 
-	systemPrompt, err := w.loadPrompt()
+	// Workspace setup: pull self repo, resolve prompt, prepare target repo.
+	workDir := ""
+	if w.ws != nil {
+		if err := w.ws.PullSelf(ctx, ""); err != nil {
+			// Non-fatal: log and continue with potentially stale prompts.
+			log.Printf("exec %s: pull self repo: %v", w.name, err)
+		}
+		if repoPath, _ := session.Metadata["workspace_repo"].(string); repoPath != "" {
+			dir, err := w.ws.PrepareRepo(ctx, repoPath, "")
+			if err != nil {
+				return nil, fmt.Errorf("exec %s: prepare repo %q: %w", w.name, repoPath, err)
+			}
+			workDir = dir
+		}
+	}
+
+	systemPrompt, err := w.loadPrompt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: %w", w.name, err)
 	}
 
 	input := buildInput(systemPrompt, session)
 
-	output, err := w.runCmd(ctx, cmd, input)
+	output, err := w.runCmd(ctx, cmd, workDir, input)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: %w", w.name, err)
+	}
+
+	// Optionally commit work in the target repo after a successful run.
+	if w.ws != nil && w.commitWork && workDir != "" {
+		msg := fmt.Sprintf("agentq: session %s agent %s", sessionID, w.name)
+		if err := w.ws.CommitWork(ctx, workDir, msg); err != nil {
+			log.Printf("exec %s: commit work: %v", w.name, err)
+		}
 	}
 
 	if err := w.store.UpdateSession(ctx, sessionID, func(s *models.Session) error {
@@ -122,7 +164,20 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 	}, nil
 }
 
-func (w *Worker) loadPrompt() (string, error) {
+// loadPrompt returns the system prompt. Workspace takes precedence over
+// promptFile: if a workspace is configured, the prompt is read from the self
+// repo. Falls back to promptFile, then empty string.
+func (w *Worker) loadPrompt(ctx context.Context) (string, error) {
+	if w.ws != nil {
+		p, err := w.ws.PromptFor(w.name)
+		if err != nil {
+			return "", fmt.Errorf("workspace prompt for %q: %w", w.name, err)
+		}
+		if p != "" {
+			return p, nil
+		}
+		// Fall through to promptFile if workspace has no prompt for this agent.
+	}
 	if w.promptFile == "" {
 		return "", nil
 	}
@@ -130,12 +185,17 @@ func (w *Worker) loadPrompt() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read prompt file %q: %w", w.promptFile, err)
 	}
-	return string(data), nil
+	return strings.TrimSpace(string(data)), nil
 }
 
-func (w *Worker) runCmd(ctx context.Context, shellCmd, input string) (string, error) {
+// runCmd runs shellCmd via sh -c with input on stdin. workDir sets the working
+// directory; empty string means inherit the process working directory.
+func (w *Worker) runCmd(ctx context.Context, shellCmd, workDir, input string) (string, error) {
 	cmd := osexec.CommandContext(ctx, "sh", "-c", shellCmd)
 	cmd.Stdin = strings.NewReader(input)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -28,6 +28,7 @@ export function Sessions() {
   const [error, setError] = useState('');
   const [showSubmit, setShowSubmit] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [repo, setRepo] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const load = () =>
@@ -46,8 +47,11 @@ export function Sessions() {
     if (!prompt.trim()) return;
     setSubmitting(true);
     try {
-      const res = await submitSession({ prompt: prompt.trim() });
+      const req: Parameters<typeof submitSession>[0] = { prompt: prompt.trim() };
+      if (repo.trim()) req.repo = repo.trim();
+      const res = await submitSession(req);
       setPrompt('');
+      setRepo('');
       setShowSubmit(false);
       navigate(`/sessions/${res.session_id}`);
     } catch (e) {
@@ -75,6 +79,13 @@ export function Sessions() {
             onChange={e => setPrompt(e.target.value)}
             rows={4}
             autoFocus
+          />
+          <input
+            className="submit-input"
+            type="text"
+            placeholder="Workspace repo (optional, e.g. github.com/shiblon/agentq)"
+            value={repo}
+            onChange={e => setRepo(e.target.value)}
           />
           <button className="btn-primary" type="submit" disabled={submitting}>
             {submitting ? 'Submitting...' : 'Submit'}

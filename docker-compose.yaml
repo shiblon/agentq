@@ -66,5 +66,30 @@ services:
     depends_on:
       - prometheus
 
+  gitea:
+    image: gitea/gitea:latest
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+    ports:
+      - "3001:3000"   # Gitea web UI
+      - "2222:22"     # Gitea SSH
+    volumes:
+      - gitea-data:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: agentq
+      MINIO_ROOT_PASSWORD: agentqsecret
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO console
+    volumes:
+      - minio-data:/data
+
 volumes:
   eq-journal:
+  gitea-data:
+  minio-data:

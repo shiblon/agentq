@@ -10,6 +10,7 @@ import (
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/workers/exec"
 	"github.com/shiblon/agentq/pkg/workers/supervisor"
+	"github.com/shiblon/agentq/pkg/workspace"
 	"github.com/shiblon/entroq"
 	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
@@ -34,6 +35,8 @@ func init() {
 	viper.BindPFlag("llm_addr", runCmd.Flags().Lookup("llm-addr"))
 	runCmd.Flags().String("llm-model", "", "LLM model name for the supervisor (env: AGENTQ_LLM_MODEL)")
 	viper.BindPFlag("llm_model", runCmd.Flags().Lookup("llm-model"))
+	runCmd.Flags().Bool("commit-work", false, "Git-commit and push target repo changes after each task")
+	viper.BindPFlag("commit_work", runCmd.Flags().Lookup("commit-work"))
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -131,6 +134,20 @@ func runExec(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, agentNa
 	if agent.ApprovalSuffix != "" {
 		opts = append(opts, exec.WithApprovalSuffix(agent.ApprovalSuffix))
 		log.Printf("%s: approval suffix %q", agentName, agent.ApprovalSuffix)
+	}
+
+	ws := cfg.ResolvedWorkspace()
+	if ws.Root != "" && ws.Self != "" {
+		w, err := workspace.New(ws.Root, ws.Self)
+		if err != nil {
+			return fmt.Errorf("init workspace: %w", err)
+		}
+		opts = append(opts, exec.WithWorkspace(w))
+		log.Printf("%s: workspace root=%q self=%q", agentName, ws.Root, ws.Self)
+		if viper.GetBool("commit_work") {
+			opts = append(opts, exec.WithCommitWork(true))
+			log.Printf("%s: commit-work enabled", agentName)
+		}
 	}
 
 	w := exec.New(agentName, agent.Cmd, eq, opts...)

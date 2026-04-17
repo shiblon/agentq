@@ -22,8 +22,14 @@ type SubmitResult struct {
 // SubmitSession creates a new session and enqueues it for the supervisor.
 // If continueFrom is non-empty, artifacts are inherited from that parent session.
 // If compact is true, the supervisor will be asked to summarize inherited context.
-func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, userID, prompt, continueFrom string, compact bool) (*SubmitResult, error) {
+// If repo is non-empty (e.g. "github.com/shiblon/agentq"), it is stored in
+// session metadata as "workspace_repo" so exec workers know which directory to
+// work in.
+func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, userID, prompt, continueFrom, repo string, compact bool) (*SubmitResult, error) {
 	session := models.NewSession(userID, prompt)
+	if repo != "" {
+		session.Metadata["workspace_repo"] = repo
+	}
 
 	if continueFrom != "" {
 		parent, err := st.GetSession(ctx, continueFrom)

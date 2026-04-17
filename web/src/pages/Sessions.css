@@ -25,6 +25,21 @@
   border-color: var(--color-accent);
 }
 
+.submit-input {
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.submit-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
 .filter-tabs {
   display: flex;
   gap: 0.25rem;
