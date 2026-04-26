@@ -14,6 +14,7 @@ import (
 
 	osexec "os/exec"
 
+	"github.com/shiblon/agentq/pkg/approval"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/agentq/pkg/workspace"
@@ -28,6 +29,7 @@ type Worker struct {
 	promptFile     string // path to system prompt file (optional); overridden by workspace
 	replyQueue     string // queue to re-enqueue to after completion
 	approvalSuffix string // appended to cmd when task carries approved_actions
+	verifier       *approval.Verifier   // if set, approval_token must verify before elevation
 	ws             *workspace.Workspace // if set, manages working dir and prompt loading
 	commitWork     bool                 // if true, commit + push after each task
 	store          *store.Store
@@ -63,6 +65,14 @@ func WithWorkspace(ws *workspace.Workspace) Option {
 	return func(w *Worker) { w.ws = ws }
 }
 
+// WithVerifier sets an approval token verifier. When set, the worker checks the
+// approval_token payload field before appending the approval suffix. Without a
+// valid Macaroon the command runs without elevated permissions, regardless of
+// what approved_actions claims.
+func WithVerifier(v *approval.Verifier) Option {
+	return func(w *Worker) { w.verifier = v }
+}
+
 // WithCommitWork instructs the worker to git-commit and push any changes in
 // the target repo after each task completes. Requires WithWorkspace.
 func WithCommitWork(commit bool) Option {
@@ -94,10 +104,11 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 
 	sessionID := appTask.SessionURI[len("doc:sessions/"):]
 
-	// If the task carries approved_actions and we have an approval suffix,
-	// append it to the command so the subprocess runs with elevated permissions.
+	// Append the approval suffix only when the task carries approved_actions AND
+	// the approval token verifies (if a verifier is configured). Without a valid
+	// Macaroon the subprocess runs without elevated permissions.
 	cmd := w.cmd
-	if w.approvalSuffix != "" && hasApproval(appTask.Payload) {
+	if w.approvalSuffix != "" && hasApproval(appTask.Payload) && w.approvalVerified(appTask, sessionID) {
 		cmd = w.cmd + " " + w.approvalSuffix
 	}
 
@@ -151,9 +162,14 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 		return nil, fmt.Errorf("exec %s: update session: %w", w.name, err)
 	}
 
-	returnTask := models.NewTask(w.replyQueue, appTask.SessionURI, map[string]any{
-		"from_agent": w.name,
-	})
+	returnPayload := map[string]any{"from_agent": w.name}
+	if pt, _ := appTask.Payload["provenance_token"].(string); pt != "" {
+		returnPayload["provenance_token"] = pt
+	}
+	if dr, _ := appTask.Payload["dispatch_receipt"].(string); dr != "" {
+		returnPayload["dispatch_receipt"] = dr
+	}
+	returnTask := models.NewTask(w.replyQueue, appTask.SessionURI, returnPayload)
 	returnBytes, err := json.Marshal(returnTask)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: marshal return task: %w", w.name, err)
@@ -234,6 +250,25 @@ func hasApproval(payload map[string]any) bool {
 	}
 	actions, ok := v.([]interface{})
 	return ok && len(actions) > 0
+}
+
+// approvalVerified returns true when the task's approval_token is valid for the
+// given session. When no verifier is configured it falls back to trusting the
+// approved_actions field directly (backward-compatible dev mode).
+func (w *Worker) approvalVerified(task models.Task, sessionID string) bool {
+	if w.verifier == nil {
+		return true // no verifier configured: trust the payload (dev mode)
+	}
+	tok, _ := task.Payload["approval_token"].(string)
+	if tok == "" {
+		log.Printf("%s: approval suffix requested but no approval_token in payload -- running without elevation", w.name)
+		return false
+	}
+	if _, err := w.verifier.Verify(tok, sessionID); err != nil {
+		log.Printf("%s: approval token verification failed: %v -- running without elevation", w.name, err)
+		return false
+	}
+	return true
 }
 
 // buildInput composes the full prompt passed to the subprocess on stdin.

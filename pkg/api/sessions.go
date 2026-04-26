@@ -100,12 +100,13 @@ func (s *Server) handleSessionsSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := workflow.SubmitSession(r.Context(), s.store, s.eq, workflow.SubmitRequest{
-		UserID:       req.UserID,
-		Prompt:       req.Prompt,
-		ContinueFrom: req.ContinueFrom,
-		Repo:         req.Repo,
-		HumanToken:   BearerToken(r),
-		Compact:      req.Compact,
+		UserID:           req.UserID,
+		Prompt:           req.Prompt,
+		ContinueFrom:     req.ContinueFrom,
+		Repo:             req.Repo,
+		HumanToken:       BearerToken(r),
+		Compact:          req.Compact,
+		ProvenanceIssuer: s.provenanceIssuer,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("submit session: %v", err))

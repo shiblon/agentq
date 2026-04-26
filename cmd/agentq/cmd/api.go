@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	agentqapi "github.com/shiblon/agentq/pkg/api"
 	"github.com/shiblon/entroq"
@@ -46,6 +48,8 @@ func init() {
 	apiCmd.Flags().String("policy-dir", "", "Directory containing .rego policy files; defaults to embedded policy")
 	apiCmd.Flags().String("oidc-client-id", "", "Browser PKCE client ID forwarded to the web UI (env: AGENTQ_OIDC_CLIENT_ID)")
 	apiCmd.Flags().Bool("no-auth", false, "Disable authentication (local development only; binds to localhost)")
+	apiCmd.Flags().String("provenance-key", "", "Base64 root key for session provenance tokens (env: AGENTQ_PROVENANCE_KEY)")
+	apiCmd.Flags().String("provenance-key-file", "", "File containing base64 root key for provenance tokens (Vault Agent / secret rotation)")
 	viper.BindPFlag("api_addr", apiCmd.Flags().Lookup("addr"))
 	viper.BindPFlag("api_static_dir", apiCmd.Flags().Lookup("static-dir"))
 	viper.BindPFlag("api_jwks_url", apiCmd.Flags().Lookup("jwks-url"))
@@ -53,6 +57,8 @@ func init() {
 	viper.BindPFlag("api_policy_dir", apiCmd.Flags().Lookup("policy-dir"))
 	viper.BindPFlag("api_oidc_client_id", apiCmd.Flags().Lookup("oidc-client-id"))
 	viper.BindPFlag("api_no_auth", apiCmd.Flags().Lookup("no-auth"))
+	viper.BindPFlag("api_provenance_key", apiCmd.Flags().Lookup("provenance-key"))
+	viper.BindPFlag("api_provenance_key_file", apiCmd.Flags().Lookup("provenance-key-file"))
 }
 
 func runAPI(cmd *cobra.Command, args []string) error {
@@ -122,6 +128,26 @@ func runAPI(cmd *cobra.Command, args []string) error {
 			addr = "127.0.0.1:8080"
 		}
 		log.Printf("WARNING: authentication disabled (--no-auth); listening on %s only", addr)
+	}
+
+	provKeyFile := viper.GetString("api_provenance_key_file")
+	provKey := viper.GetString("api_provenance_key")
+	if provKeyFile != "" {
+		b, err := os.ReadFile(provKeyFile)
+		if err != nil {
+			return fmt.Errorf("read provenance key file: %w", err)
+		}
+		provKey = strings.TrimSpace(string(b))
+	}
+	if provKey != "" {
+		pi, err := agentqapi.NewProvenanceIssuerOption(ctx, provKey)
+		if err != nil {
+			return fmt.Errorf("create provenance issuer: %w", err)
+		}
+		opts = append(opts, pi)
+		log.Printf("session provenance tokens enabled")
+	} else {
+		log.Printf("session provenance tokens disabled (set --provenance-key to enable)")
 	}
 
 	srv := agentqapi.New(eq, configFile, opts...)

@@ -15,12 +15,38 @@ x-agent: &agent
     AGENTQ_LLM_ADDR: http://ollama:11434
 
 services:
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      - run
+      - --server
+      - --addr=:8181
+      - --log-format=json
+      # Core entroq authz policy (queue/namespace matching logic)
+      - /policy/core
+      # Provider policy (OIDC user + permissions implementation)
+      - /policy/providers
+      # Site-specific data (IDP config + user/queue permission matrix)
+      - /data
+    ports:
+      - "8181:8181"
+    volumes:
+      - ../entroq/pkg/authz/opadata/conf/core:/policy/core:ro
+      - ../entroq/pkg/authz/opadata/conf/providers:/policy/providers:ro
+      - ./config/entroq-policy:/data:ro
+
   eq:
     <<: *build
-    command: ["serve", "--port=37706", "--http-port=9100"]
+    command:
+      - serve
+      - --port=37706
+      - --http-port=9100
+      - --authz-url=http://opa:8181
     ports:
       - "37706:37706"
       - "9100:9100"
+    depends_on:
+      - opa
     volumes:
       - eq-journal:/data/agentq/journal
 
@@ -42,6 +68,8 @@ services:
       - --addr=:8090
       - --jwks-url=http://zitadel:8080/oauth/v2/keys
       - --issuer=http://localhost:8080
+    environment:
+      AGENTQ_PROVENANCE_KEY: ${PROVENANCE_KEY:-}
     ports:
       - "8090:8090"
     depends_on:
@@ -70,18 +98,33 @@ services:
       # Populated by deploy/zitadel-bootstrap.sh output.
       AGENTQ_CLIENT_ID: ${SUPERVISOR_CLIENT_ID:-}
       AGENTQ_CLIENT_SECRET: ${SUPERVISOR_CLIENT_SECRET:-}
+      AGENTQ_EQ_TOKEN: ${SUPERVISOR_EQ_TOKEN:-}
+      AGENTQ_PROVENANCE_KEY: ${PROVENANCE_KEY:-}
+      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
 
   coder:
     <<: *agent
     command: ["run", "--agent=coder", "--eq-addr=eq:37706"]
+    environment:
+      AGENTQ_EQ_ADDR: eq:37706
+      AGENTQ_EQ_TOKEN: ${CODER_EQ_TOKEN:-}
+      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
 
   reviewer:
     <<: *agent
     command: ["run", "--agent=reviewer", "--eq-addr=eq:37706"]
+    environment:
+      AGENTQ_EQ_ADDR: eq:37706
+      AGENTQ_EQ_TOKEN: ${REVIEWER_EQ_TOKEN:-}
+      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
 
   researcher:
     <<: *agent
     command: ["run", "--agent=researcher", "--eq-addr=eq:37706"]
+    environment:
+      AGENTQ_EQ_ADDR: eq:37706
+      AGENTQ_EQ_TOKEN: ${RESEARCHER_EQ_TOKEN:-}
+      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
 
   prometheus:
     image: prom/prometheus:latest

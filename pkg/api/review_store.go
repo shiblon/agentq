@@ -87,6 +87,7 @@ func (rs *reviewStore) process(ctx context.Context, taskID, outcome, humanInput 
 	rs.mu.Unlock()
 
 	reply := models.NewReviewReply(h.request.SessionURI, outcome, humanInput, taskID)
+	reply.ProvenanceToken = h.request.ProvenanceToken
 	replyBytes, err := json.Marshal(reply)
 	if err != nil {
 		return fmt.Errorf("marshal reply: %w", err)

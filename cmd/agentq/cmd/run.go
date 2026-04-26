@@ -6,8 +6,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/shiblon/agentq/pkg/approval"
 	"github.com/shiblon/agentq/pkg/auth"
 	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/llm"
@@ -50,11 +52,63 @@ func init() {
 	runCmd.Flags().String("client-secret", "", "OAuth client secret for token exchange (env: AGENTQ_CLIENT_SECRET)")
 	runCmd.Flags().String("client-id-file", "", "File containing OAuth client ID (Vault Agent / secret rotation)")
 	runCmd.Flags().String("client-secret-file", "", "File containing OAuth client secret (Vault Agent / secret rotation)")
+	runCmd.Flags().String("eq-token", "", "Bearer token for entroq queue access (env: AGENTQ_EQ_TOKEN)")
+	runCmd.Flags().String("eq-token-file", "", "File containing bearer token for entroq queue access (Vault Agent / secret rotation)")
+	runCmd.Flags().String("approval-key", "", "Base64 root key for signing/verifying approval tokens (env: AGENTQ_APPROVAL_KEY)")
+	runCmd.Flags().String("approval-key-file", "", "File containing base64 root key for approval tokens (Vault Agent / secret rotation)")
+	runCmd.Flags().String("provenance-key", "", "Base64 root key for verifying session provenance tokens (env: AGENTQ_PROVENANCE_KEY)")
+	runCmd.Flags().String("provenance-key-file", "", "File containing base64 root key for provenance tokens (Vault Agent / secret rotation)")
 	viper.BindPFlag("token_url", runCmd.Flags().Lookup("token-url"))
 	viper.BindPFlag("client_id", runCmd.Flags().Lookup("client-id"))
 	viper.BindPFlag("client_secret", runCmd.Flags().Lookup("client-secret"))
 	viper.BindPFlag("client_id_file", runCmd.Flags().Lookup("client-id-file"))
 	viper.BindPFlag("client_secret_file", runCmd.Flags().Lookup("client-secret-file"))
+	viper.BindPFlag("eq_token", runCmd.Flags().Lookup("eq-token"))
+	viper.BindPFlag("eq_token_file", runCmd.Flags().Lookup("eq-token-file"))
+	viper.BindPFlag("approval_key", runCmd.Flags().Lookup("approval-key"))
+	viper.BindPFlag("approval_key_file", runCmd.Flags().Lookup("approval-key-file"))
+	viper.BindPFlag("provenance_key", runCmd.Flags().Lookup("provenance-key"))
+	viper.BindPFlag("provenance_key_file", runCmd.Flags().Lookup("provenance-key-file"))
+}
+
+// eqToken resolves the bearer token for entroq connections.
+// --eq-token-file takes precedence over --eq-token.
+// Returns empty string if neither is set (unauthenticated mode).
+func eqToken() (string, error) {
+	if f := viper.GetString("eq_token_file"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read eq token file %q: %w", f, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return viper.GetString("eq_token"), nil
+}
+
+// approvalKey resolves the base64 root key for approval token signing/verification.
+// --approval-key-file takes precedence over --approval-key.
+// Returns empty string if neither is set (approval tokens disabled).
+func approvalKey() (string, error) {
+	if f := viper.GetString("approval_key_file"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read approval key file %q: %w", f, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return viper.GetString("approval_key"), nil
+}
+
+// provenanceKey resolves the base64 root key for provenance token verification.
+func provenanceKey() (string, error) {
+	if f := viper.GetString("provenance_key_file"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read provenance key file %q: %w", f, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return viper.GetString("provenance_key"), nil
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -72,7 +126,17 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	configFile := viper.GetString("config")
 	ctx := cmd.Context()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eqOpts := []eqgrpc.Option{eqgrpc.WithInsecure()}
+	if tok, err := eqToken(); err != nil {
+		return fmt.Errorf("resolve eq token: %w", err)
+	} else if tok != "" {
+		eqOpts = append(eqOpts, eqgrpc.WithBearerToken(tok))
+		log.Printf("entroq: using bearer token for queue access")
+	} else {
+		log.Printf("entroq: no token configured (set --eq-token or --eq-token-file for queue authorization)")
+	}
+
+	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqOpts...))
 	if err != nil {
 		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
 	}
@@ -83,32 +147,48 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	apKey, err := approvalKey()
+	if err != nil {
+		return fmt.Errorf("resolve approval key: %w", err)
+	}
+	if apKey == "" {
+		log.Printf("approval tokens disabled (set --approval-key or --approval-key-file to enable)")
+	}
+
+	provKey, err := provenanceKey()
+	if err != nil {
+		return fmt.Errorf("resolve provenance key: %w", err)
+	}
+	if provKey == "" {
+		log.Printf("provenance verification disabled (set --provenance-key or --provenance-key-file to enable)")
+	}
+
 	if all {
-		return runAll(ctx, eq, cfg)
+		return runAll(ctx, eq, cfg, apKey, provKey)
 	}
 	if agentName == "supervisor" {
-		return runSupervisor(ctx, eq, cfg)
+		return runSupervisor(ctx, eq, cfg, apKey, provKey)
 	}
-	return runExec(ctx, eq, cfg, agentName)
+	return runExec(ctx, eq, cfg, agentName, apKey)
 }
 
 // runAll starts the supervisor and every agent defined in cfg concurrently.
 // All workers share the same context; the first to return a non-nil error
 // cancels the rest.
-func runAll(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config) error {
+func runAll(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, apKey, provKey string) error {
 	g, ctx := errgroup.WithContext(ctx)
 
-	g.Go(func() error { return runSupervisor(ctx, eq, cfg) })
+	g.Go(func() error { return runSupervisor(ctx, eq, cfg, apKey, provKey) })
 
 	for _, a := range cfg.Agents {
-		g.Go(func() error { return runExec(ctx, eq, cfg, a.Name) })
+		g.Go(func() error { return runExec(ctx, eq, cfg, a.Name, apKey) })
 	}
 
 	log.Printf("run --all: supervisor + %d agent(s) started", len(cfg.Agents))
 	return g.Wait()
 }
 
-func runSupervisor(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config) error {
+func runSupervisor(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, apKey, provKey string) error {
 	llmAddr := viper.GetString("llm_addr")
 	llmModel := viper.GetString("llm_model")
 	tokenURL := viper.GetString("token_url")
@@ -161,6 +241,26 @@ func runSupervisor(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config) e
 		log.Printf("supervisor: token exchange disabled (set --token-url to enable)")
 	}
 
+	var issuer *approval.Issuer
+	var receiptIssuer *approval.ReceiptIssuer
+	var receiptVerifier *approval.ReceiptVerifier
+	if apKey != "" {
+		var err error
+		issuer, err = approval.NewIssuerFromBase64(apKey, "agentq-supervisor")
+		if err != nil {
+			return fmt.Errorf("create approval issuer: %w", err)
+		}
+		receiptIssuer, err = approval.NewReceiptIssuer(apKey, "agentq-supervisor")
+		if err != nil {
+			return fmt.Errorf("create receipt issuer: %w", err)
+		}
+		receiptVerifier, err = approval.NewReceiptVerifier(apKey)
+		if err != nil {
+			return fmt.Errorf("create receipt verifier: %w", err)
+		}
+		log.Printf("supervisor: approval tokens and dispatch receipts enabled")
+	}
+
 	supCfg := &models.AgentConfig{
 		Name:       "supervisor",
 		InputQueue: "supervisor",
@@ -194,6 +294,23 @@ func runSupervisor(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config) e
 		if exchanger != nil {
 			opts = append(opts, supervisor.WithTokenExchanger(exchanger))
 		}
+		if issuer != nil {
+			opts = append(opts, supervisor.WithIssuer(issuer))
+		}
+		if receiptIssuer != nil {
+			opts = append(opts, supervisor.WithReceiptIssuer(receiptIssuer))
+		}
+		if receiptVerifier != nil {
+			opts = append(opts, supervisor.WithReceiptVerifier(receiptVerifier))
+		}
+		if provKey != "" {
+			pv, err := approval.NewProvenanceVerifier(provKey)
+			if err != nil {
+				return fmt.Errorf("supervisor: create provenance verifier: %w", err)
+			}
+			opts = append(opts, supervisor.WithProvenanceVerifier(pv))
+			log.Printf("supervisor: provenance verification enabled")
+		}
 		sup := supervisor.New(eq, opts...)
 
 		mods, err := sup.ProcessTask(ctx, task)
@@ -207,7 +324,7 @@ func runSupervisor(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config) e
 	}
 }
 
-func runExec(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, agentName string) error {
+func runExec(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, agentName, apKey string) error {
 	agent, ok := cfg.Get(agentName)
 	if !ok {
 		return fmt.Errorf("agent %q not found in config; define it in agents.yaml", agentName)
@@ -227,6 +344,14 @@ func runExec(ctx context.Context, eq *entroq.EntroQ, cfg *config.Config, agentNa
 	if agent.ApprovalSuffix != "" {
 		opts = append(opts, exec.WithApprovalSuffix(agent.ApprovalSuffix))
 		log.Printf("%s: approval suffix %q", agentName, agent.ApprovalSuffix)
+	}
+	if apKey != "" {
+		verifier, err := approval.NewVerifierFromBase64(apKey)
+		if err != nil {
+			return fmt.Errorf("%s: create approval verifier: %w", agentName, err)
+		}
+		opts = append(opts, exec.WithVerifier(verifier))
+		log.Printf("%s: approval token verification enabled", agentName)
 	}
 
 	ws := cfg.ResolvedWorkspace()

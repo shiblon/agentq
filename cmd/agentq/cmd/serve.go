@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/shiblon/entroq/pkg/authz/opahttp"
 	"github.com/shiblon/entroq/pkg/backend/eqmem"
 	"github.com/shiblon/entroq/pkg/eqsvcgrpc"
 	"github.com/shiblon/entroq/pkg/eqsvcjson"
@@ -32,10 +33,12 @@ func init() {
 	serveCmd.Flags().Int("http-port", 9100, "HTTP port for /metrics and Connect JSON endpoints")
 	serveCmd.Flags().String("journal", "/data/agentq/journal", "Journal directory for persistence (empty disables journaling)")
 	serveCmd.Flags().Bool("mkdir", true, "Create the journal directory if it does not exist")
+	serveCmd.Flags().String("authz-url", "", "OPA HTTP URL for queue-level authorization (e.g. http://localhost:8181); omit to disable")
 	viper.BindPFlag("serve_port", serveCmd.Flags().Lookup("port"))
 	viper.BindPFlag("serve_http_port", serveCmd.Flags().Lookup("http-port"))
 	viper.BindPFlag("serve_journal", serveCmd.Flags().Lookup("journal"))
 	viper.BindPFlag("serve_mkdir", serveCmd.Flags().Lookup("mkdir"))
+	viper.BindPFlag("serve_authz_url", serveCmd.Flags().Lookup("authz-url"))
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -43,6 +46,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	httpPort := viper.GetInt("serve_http_port")
 	journalDir := viper.GetString("serve_journal")
 	mkdir := viper.GetBool("serve_mkdir")
+	authzURL := viper.GetString("serve_authz_url")
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -69,8 +73,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer stopMetrics()
 
 	ctx := cmd.Context()
-	svc, err := eqsvcgrpc.New(ctx, eqmem.Opener(append(memOpts, eqmem.WithMeterProvider(mp))...),
-		eqsvcgrpc.WithMeterProvider(mp))
+
+	svcOpts := []eqsvcgrpc.Option{eqsvcgrpc.WithMeterProvider(mp)}
+	if authzURL != "" {
+		az := opahttp.New(opahttp.WithHostURL(authzURL))
+		svcOpts = append(svcOpts, eqsvcgrpc.WithAuthorizer(az))
+		log.Printf("entroq queue authorization enabled: opa=%s", authzURL)
+	} else {
+		log.Printf("entroq queue authorization disabled (set --authz-url to enable)")
+	}
+
+	svc, err := eqsvcgrpc.New(ctx, eqmem.Opener(append(memOpts, eqmem.WithMeterProvider(mp))...), svcOpts...)
 	if err != nil {
 		return fmt.Errorf("create eqmem service: %w", err)
 	}

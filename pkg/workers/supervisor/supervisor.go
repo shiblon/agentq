@@ -7,6 +7,9 @@ import (
 	"log"
 	"strings"
 
+	"time"
+
+	"github.com/shiblon/agentq/pkg/approval"
 	"github.com/shiblon/agentq/pkg/auth"
 	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/llm"
@@ -75,7 +78,11 @@ type Supervisor struct {
 	llm       llm.Client
 	agents    []config.Agent
 	rubric    string
-	exchanger *auth.TokenExchanger // nil means no token exchange
+	exchanger          *auth.TokenExchanger         // nil means no token exchange
+	issuer             *approval.Issuer             // nil means approval tokens disabled
+	provenanceVerifier *approval.ProvenanceVerifier // nil means provenance not enforced
+	receiptIssuer      *approval.ReceiptIssuer      // nil means dispatch receipts disabled
+	receiptVerifier    *approval.ReceiptVerifier    // nil means receipt verification disabled
 }
 
 // Option is a functional option for configuring a Supervisor.
@@ -142,6 +149,36 @@ func WithTokenExchanger(e *auth.TokenExchanger) Option {
 	return func(s *Supervisor) { s.exchanger = e }
 }
 
+// WithProvenanceVerifier enforces session provenance. When set, every task
+// processed by the supervisor must carry a valid provenance token minted by
+// the API server. Tasks without a valid token are dropped.
+func WithProvenanceVerifier(v *approval.ProvenanceVerifier) Option {
+	return func(s *Supervisor) { s.provenanceVerifier = v }
+}
+
+// WithReceiptIssuer enables dispatch receipts. When set, the supervisor mints
+// a receipt for every outgoing agent task. Exec workers carry it back in their
+// return task; WithReceiptVerifier then enforces it.
+func WithReceiptIssuer(ri *approval.ReceiptIssuer) Option {
+	return func(s *Supervisor) { s.receiptIssuer = ri }
+}
+
+// WithReceiptVerifier enforces dispatch receipts on return tasks. When set,
+// any return task (identified by a non-empty "from_agent" payload field) must
+// carry a valid receipt minted by the supervisor. Tasks without a valid receipt
+// are dropped.
+func WithReceiptVerifier(rv *approval.ReceiptVerifier) Option {
+	return func(s *Supervisor) { s.receiptVerifier = rv }
+}
+
+// WithIssuer enables Macaroon-based approval tokens. When set, the supervisor
+// mints a signed token for every elevated dispatch and human-approved re-dispatch.
+// Exec workers configured with a matching Verifier will enforce the token before
+// applying the approval suffix to their command.
+func WithIssuer(iss *approval.Issuer) Option {
+	return func(s *Supervisor) { s.issuer = iss }
+}
+
 // ProcessTask handles an incoming supervisor task. It peeks at the message
 // type to distinguish normal dispatches from human-review replies.
 func (s *Supervisor) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
@@ -198,6 +235,29 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 
 	sessionID := appTask.SessionURI[len("doc:sessions/"):]
 
+	// Verify session provenance before doing any work. Drop tasks that cannot
+	// prove they originated from a legitimate API submission.
+	provenanceToken, _ := appTask.Payload["provenance_token"].(string)
+	if s.provenanceVerifier != nil {
+		if err := s.provenanceVerifier.Verify(provenanceToken, sessionID); err != nil {
+			log.Printf("supervisor: dropping task for session %s: provenance verification failed: %v", sessionID, err)
+			return []entroq.ModifyArg{task.Delete()}, nil
+		}
+	}
+
+	// Verify dispatch receipt on return tasks. A return task carries "from_agent"
+	// in its payload; a new session submission does not. Drop returns without a
+	// valid receipt -- a rogue worker cannot forge a receipt for a dispatch it
+	// never received.
+	fromAgent, _ := appTask.Payload["from_agent"].(string)
+	if fromAgent != "" && s.receiptVerifier != nil {
+		serialized, _ := appTask.Payload["dispatch_receipt"].(string)
+		if _, err := s.receiptVerifier.Verify(serialized, sessionID, fromAgent); err != nil {
+			log.Printf("supervisor: dropping return from %q for session %s: receipt verification failed: %v", fromAgent, sessionID, err)
+			return []entroq.ModifyArg{task.Delete()}, nil
+		}
+	}
+
 	// Drop tasks for cancelled sessions immediately without processing.
 	{
 		session, err := s.store.GetSession(ctx, sessionID)
@@ -252,12 +312,29 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		if outQueue == "" {
 			return nil, fmt.Errorf("re_dispatch: no queue for agent %q", decision.Agent)
 		}
+		approvalToken, err := s.mintApprovalToken(sessionID, decision.ApprovedActions)
+		if err != nil {
+			return nil, err
+		}
+		receipt, err := s.mintReceipt(sessionID, decision.Agent)
+		if err != nil {
+			return nil, err
+		}
 		payload := map[string]any{
 			"agent":            decision.Agent,
 			"approved_actions": decision.ApprovedActions,
 		}
+		if approvalToken != "" {
+			payload["approval_token"] = approvalToken
+		}
+		if receipt != "" {
+			payload["dispatch_receipt"] = receipt
+		}
 		if agentToken != "" {
 			payload["agent_token"] = agentToken
+		}
+		if provenanceToken != "" {
+			payload["provenance_token"] = provenanceToken
 		}
 		child := models.NewTask(outQueue, appTask.SessionURI, payload)
 		childBytes, err := json.Marshal(child)
@@ -279,6 +356,7 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 			Reason:          decision.Reason,
 			ReplyQueue:      "supervisor",
 			ContextSummary:  summary,
+			ProvenanceToken: provenanceToken,
 		}
 		reqBytes, err := json.Marshal(req)
 		if err != nil {
@@ -292,11 +370,21 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		if outQueue == "" {
 			return nil, fmt.Errorf("no output queue for agent %q", decision.Next)
 		}
+		receipt, err := s.mintReceipt(sessionID, decision.Next)
+		if err != nil {
+			return nil, err
+		}
 		payload := map[string]any{
 			"agent": decision.Next,
 		}
+		if receipt != "" {
+			payload["dispatch_receipt"] = receipt
+		}
 		if agentToken != "" {
 			payload["agent_token"] = agentToken
+		}
+		if provenanceToken != "" {
+			payload["provenance_token"] = provenanceToken
 		}
 		child := models.NewTask(outQueue, appTask.SessionURI, payload)
 		childBytes, err := json.Marshal(child)
@@ -348,13 +436,30 @@ func (s *Supervisor) handleReviewReply(ctx context.Context, task *entroq.Task) (
 		if replySession != nil {
 			replyAgentToken = s.exchangeToken(ctx, replySession)
 		}
+		approvalToken, err := s.mintApprovalToken(sessionID, []string{"all"})
+		if err != nil {
+			return nil, err
+		}
+		receipt, err := s.mintReceipt(sessionID, agentName)
+		if err != nil {
+			return nil, err
+		}
 		replyPayload := map[string]any{
 			"agent":            agentName,
 			"approved_actions": []string{"all"},
 			"human_input":      reply.HumanInput,
 		}
+		if approvalToken != "" {
+			replyPayload["approval_token"] = approvalToken
+		}
+		if receipt != "" {
+			replyPayload["dispatch_receipt"] = receipt
+		}
 		if replyAgentToken != "" {
 			replyPayload["agent_token"] = replyAgentToken
+		}
+		if reply.ProvenanceToken != "" {
+			replyPayload["provenance_token"] = reply.ProvenanceToken
 		}
 		child := models.NewTask(outQueue, reply.SessionURI, replyPayload)
 		childBytes, err := json.Marshal(child)
@@ -376,6 +481,32 @@ func (s *Supervisor) handleReviewReply(ctx context.Context, task *entroq.Task) (
 	}
 
 	return mods, nil
+}
+
+// mintReceipt mints a dispatch receipt for the given session and agent.
+// Returns empty string (no error) when no receipt issuer is configured.
+func (s *Supervisor) mintReceipt(sessionID, agentName string) (string, error) {
+	if s.receiptIssuer == nil {
+		return "", nil
+	}
+	r, err := s.receiptIssuer.Mint(sessionID, agentName)
+	if err != nil {
+		return "", fmt.Errorf("mint dispatch receipt: %w", err)
+	}
+	return r.Serialize()
+}
+
+// mintApprovalToken mints a Macaroon approval token for the given session and
+// actions. Returns empty string (no error) when no issuer is configured.
+func (s *Supervisor) mintApprovalToken(sessionID string, actions []string) (string, error) {
+	if s.issuer == nil {
+		return "", nil
+	}
+	tok, err := s.issuer.Mint(sessionID, actions, 10*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("mint approval token: %w", err)
+	}
+	return tok.Serialize()
 }
 
 // dispatchArtifact creates a supervisor dispatch artifact with JSON content

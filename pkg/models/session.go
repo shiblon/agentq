@@ -38,6 +38,10 @@ type SessionMeta struct {
 	HumanToken string `json:"human_token,omitempty"`
 	// WorkspaceRepo is the target repository path agents should work in.
 	WorkspaceRepo string `json:"workspace_repo,omitempty"`
+	// ProvenanceToken is a Macaroon minted by the API server at session
+	// creation. It proves this session originated from a legitimate API
+	// submission and is carried in every supervisor task for the session.
+	ProvenanceToken string `json:"provenance_token,omitempty"`
 }
 
 // Session represents a user-initiated workflow with session context.

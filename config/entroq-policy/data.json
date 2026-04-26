@@ -1,0 +1,73 @@
+{
+  "entroq": {
+    "idp": {
+      "_comment": "Replace these values to match your IDP. See deploy/zitadel-bootstrap.sh output.",
+      "jwks_url": "http://zitadel:8080/oauth/v2/keys",
+      "audience":  "agentq",
+      "issuer":    "http://localhost:8080"
+    },
+    "policy": {
+      "_comment": [
+        "Replace REPLACE_WITH_*_SUB with the JWT sub claims from your IDP.",
+        "Machine user sub claims appear in Zitadel under Users > Machine Users > <user> > Details.",
+        "",
+        "Permission model:",
+        "  supervisor  -- CLAIM+DELETE+CHANGE on supervisor and human_review; INSERT everywhere",
+        "  each agent  -- CLAIM+DELETE+CHANGE on its own queue only; INSERT to supervisor only"
+      ],
+      "users": [
+        {
+          "name": "REPLACE_WITH_API_SERVER_SUB",
+          "queues": [
+            {"exact": "supervisor", "actions": ["INSERT"]}
+          ],
+          "namespaces": [
+            {"exact": "sessions", "actions": ["INSERT", "CHANGE", "READ"]}
+          ]
+        },
+        {
+          "name": "REPLACE_WITH_SUPERVISOR_SUB",
+          "queues": [
+            {"exact": "supervisor",   "actions": ["CLAIM", "DELETE", "CHANGE"]},
+            {"exact": "human_review", "actions": ["CLAIM", "DELETE", "CHANGE"]},
+            {"prefix": "",            "actions": ["INSERT"]}
+          ],
+          "namespaces": [
+            {"exact": "sessions", "actions": ["CHANGE", "READ"]}
+          ]
+        },
+        {
+          "name": "REPLACE_WITH_CODER_SUB",
+          "queues": [
+            {"exact": "coder_queue", "actions": ["CLAIM", "DELETE", "CHANGE"]},
+            {"exact": "supervisor",  "actions": ["INSERT"]}
+          ],
+          "namespaces": [
+            {"exact": "sessions", "actions": ["CHANGE", "READ"]}
+          ]
+        },
+        {
+          "name": "REPLACE_WITH_REVIEWER_SUB",
+          "queues": [
+            {"exact": "reviewer_queue", "actions": ["CLAIM", "DELETE", "CHANGE"]},
+            {"exact": "supervisor",     "actions": ["INSERT"]}
+          ],
+          "namespaces": [
+            {"exact": "sessions", "actions": ["CHANGE", "READ"]}
+          ]
+        },
+        {
+          "name": "REPLACE_WITH_RESEARCHER_SUB",
+          "queues": [
+            {"exact": "researcher_queue", "actions": ["CLAIM", "DELETE", "CHANGE"]},
+            {"exact": "supervisor",       "actions": ["INSERT"]}
+          ],
+          "namespaces": [
+            {"exact": "sessions", "actions": ["CHANGE", "READ"]}
+          ]
+        }
+      ],
+      "roles": []
+    }
+  }
+}

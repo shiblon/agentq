@@ -3,10 +3,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/shiblon/agentq/pkg/approval"
 
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/entroq"
@@ -19,8 +22,9 @@ type Server struct {
 	configFile   string // path to agents.yaml; reloaded per-request for mutations
 	auth         Authorizer
 	validator    *JWKSValidator // nil means no authn enforcement
-	issuer       string         // OIDC issuer URL, forwarded to the frontend via /api/v1/config
-	oidcClientID string         // browser PKCE client ID, forwarded to the frontend
+	issuer            string         // OIDC issuer URL, forwarded to the frontend via /api/v1/config
+	oidcClientID      string         // browser PKCE client ID, forwarded to the frontend
+	provenanceIssuer  *approval.ProvenanceIssuer // nil means provenance tokens disabled
 	staticDir    string         // if set, serves static files (web UI) from this directory
 	reviews      *reviewStore
 }
@@ -47,6 +51,23 @@ func WithIssuer(issuer string) Option {
 // WithOIDCClientID sets the browser PKCE client ID forwarded to the frontend.
 func WithOIDCClientID(id string) Option {
 	return func(s *Server) { s.oidcClientID = id }
+}
+
+// WithProvenanceIssuer enables session provenance tokens. When set, every
+// submitted session receives a signed token proving it originated from this
+// API server. The supervisor uses a matching verifier to reject forged tasks.
+func WithProvenanceIssuer(p *approval.ProvenanceIssuer) Option {
+	return func(s *Server) { s.provenanceIssuer = p }
+}
+
+// NewProvenanceIssuerOption creates a WithProvenanceIssuer option from a
+// base64-encoded root key. Convenience wrapper for use in cmd/agentq/cmd/api.go.
+func NewProvenanceIssuerOption(_ context.Context, base64Key string) (Option, error) {
+	pi, err := approval.NewProvenanceIssuer(base64Key, "agentq-api")
+	if err != nil {
+		return nil, err
+	}
+	return WithProvenanceIssuer(pi), nil
 }
 
 // WithStaticDir serves static files from dir at the root path, with SPA
