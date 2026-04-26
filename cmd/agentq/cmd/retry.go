@@ -6,10 +6,10 @@ import (
 	"github.com/shiblon/entroq"
 )
 
-// retryDelay returns an exponential backoff delay capped at 5 minutes,
-// based on the number of prior attempts on the task.
+// retryDelay returns an exponential backoff delay capped at 5 minutes:
+// attempt 0 -> 30s, 1 -> 60s, 2 -> 120s, 3 -> 240s, 4+ -> 300s.
 func retryDelay(attempts int32) time.Duration {
-	d := time.Duration(attempts+1) * 30 * time.Second
+	d := time.Duration(int64(1)<<attempts) * 30 * time.Second
 	if d > 5*time.Minute {
 		d = 5 * time.Minute
 	}

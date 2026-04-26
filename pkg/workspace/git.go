@@ -72,6 +72,18 @@ func gitHasChanges(ctx context.Context, dir string) (bool, error) {
 	return out != "", nil
 }
 
+// gitUntrackedFiles returns the paths of untracked files relative to dir.
+func gitUntrackedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := gitOutput(ctx, dir, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // GitCurrentRef returns the current HEAD commit SHA (short).
 func GitCurrentRef(ctx context.Context, dir string) (string, error) {
 	return gitOutput(ctx, dir, "rev-parse", "--short", "HEAD")

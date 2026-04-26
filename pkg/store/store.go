@@ -4,25 +4,19 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/entroq"
 )
 
-const (
-	nsSessions = "sessions"
-	nsConfigs  = "configs"
-)
+const nsSessions = "sessions"
 
 // SessionURI returns the doc: URI for a session.
 func SessionURI(sessionID string) string {
 	return "doc:sessions/" + sessionID
 }
 
-// ConfigURI returns the doc: URI for an agent config.
-func ConfigURI(agentName string) string {
-	return "doc:configs/" + agentName
-}
 
 // Store wraps an entroq client with typed doc operations for sessions and configs.
 type Store struct {
@@ -74,11 +68,13 @@ func (s *Store) PutSession(ctx context.Context, session *models.Session) error {
 	return nil
 }
 
+const maxUpdateRetries = 10
+
 // UpdateSession fetches the current session, applies fn to it, and saves it.
-// On a version conflict it re-fetches and retries, so fn must be idempotent
-// with respect to its side effects (pure mutations of the session value are fine).
+// On a version conflict it re-fetches and retries up to maxUpdateRetries times,
+// so fn must be idempotent (pure mutations of the session value are fine).
 func (s *Store) UpdateSession(ctx context.Context, sessionID string, fn func(*models.Session) error) error {
-	for {
+	for attempt := range maxUpdateRetries {
 		session, err := s.GetSession(ctx, sessionID)
 		if err != nil {
 			return fmt.Errorf("UpdateSession: %w", err)
@@ -88,12 +84,14 @@ func (s *Store) UpdateSession(ctx context.Context, sessionID string, fn func(*mo
 		}
 		if err := s.PutSession(ctx, session); err != nil {
 			if entroq.IsDependency(err) {
-				continue // version conflict -- re-fetch and retry
+				time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+				continue
 			}
 			return fmt.Errorf("UpdateSession: %w", err)
 		}
 		return nil
 	}
+	return fmt.Errorf("UpdateSession %s: too many version conflicts (%d attempts)", sessionID, maxUpdateRetries)
 }
 
 // GetSession retrieves a session by ID. Returns an error if the session is not found.
@@ -110,43 +108,6 @@ func (s *Store) GetSession(ctx context.Context, sessionID string) (*models.Sessi
 		return nil, fmt.Errorf("GetSession unmarshal %s: %w", sessionID, err)
 	}
 	return &session, nil
-}
-
-// PutConfig creates or updates the config doc identified by cfg.Name.
-func (s *Store) PutConfig(ctx context.Context, cfg *models.AgentConfig) error {
-	existing, err := s.getDocByKey(ctx, nsConfigs, cfg.Name)
-	if err != nil {
-		return fmt.Errorf("PutConfig: %w", err)
-	}
-	var mod entroq.ModifyArg
-	if existing != nil {
-		mod = existing.Change(entroq.WithContent(cfg))
-	} else {
-		mod = entroq.CreatingIn(nsConfigs,
-			entroq.WithKeys(cfg.Name, ""),
-			entroq.WithContent(cfg),
-		)
-	}
-	if _, err := s.eq.Modify(ctx, mod); err != nil {
-		return fmt.Errorf("PutConfig %s: %w", cfg.Name, err)
-	}
-	return nil
-}
-
-// GetConfig retrieves an agent config by name. Returns an error if not found.
-func (s *Store) GetConfig(ctx context.Context, agentName string) (*models.AgentConfig, error) {
-	doc, err := s.getDocByKey(ctx, nsConfigs, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("GetConfig: %w", err)
-	}
-	if doc == nil {
-		return nil, fmt.Errorf("GetConfig: config for agent %q not found", agentName)
-	}
-	cfg, err := entroq.GetContent[models.AgentConfig](doc)
-	if err != nil {
-		return nil, fmt.Errorf("GetConfig unmarshal %s: %w", agentName, err)
-	}
-	return &cfg, nil
 }
 
 // sessionIDFromURI extracts the session ID from a "doc:sessions/{id}" URI.

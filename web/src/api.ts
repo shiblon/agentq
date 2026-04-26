@@ -77,8 +77,17 @@ export interface AddAgentRequest {
   approval_suffix?: string;
 }
 
+import { getToken, clearToken } from './auth';
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const headers = new Headers(init?.headers);
+  const token = getToken();
+  if (token) headers.set('Authorization', 'Bearer ' + token.accessToken);
+  const res = await fetch(path, { ...init, headers });
+  if (res.status === 401) {
+    clearToken();
+    throw new Error('401 unauthorized');
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status} ${text}`);
@@ -100,6 +109,9 @@ export const getSession = (id: string) =>
 
 export const getSessionChain = (id: string) =>
   apiFetch<Session[]>(`/api/v1/sessions/${id}/chain`);
+
+export const cancelSession = (id: string) =>
+  apiFetch<{ status: string }>(`/api/v1/sessions/${id}/cancel`, { method: 'POST' });
 
 export const submitSession = (req: SubmitRequest) =>
   apiFetch<SubmitResponse>('/api/v1/sessions', {
@@ -129,3 +141,17 @@ export const listQueues = () =>
 // Review
 export const listReview = () =>
   apiFetch<ReviewItem[]>('/api/v1/review');
+
+export const approveReview = (taskId: string, humanInput?: string) =>
+  apiFetch<{ outcome: string }>(`/api/v1/review/${encodeURIComponent(taskId)}/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ human_input: humanInput ?? '' }),
+  });
+
+export const rejectReview = (taskId: string, humanInput?: string) =>
+  apiFetch<{ outcome: string }>(`/api/v1/review/${encodeURIComponent(taskId)}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ human_input: humanInput ?? '' }),
+  });

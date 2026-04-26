@@ -19,27 +19,29 @@ type SubmitResult struct {
 	SessionURI string
 }
 
-// SubmitSession creates a new session and enqueues it for the supervisor.
-// If continueFrom is non-empty, artifacts are inherited from that parent session.
-// If compact is true, the supervisor will be asked to summarize inherited context.
-// If repo is non-empty (e.g. "github.com/shiblon/agentq"), it is stored in
-// session metadata as "workspace_repo" so exec workers know which directory to
-// work in.
-func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, userID, prompt, continueFrom, repo string, compact bool) (*SubmitResult, error) {
-	session := models.NewSession(userID, prompt)
-	if repo != "" {
-		session.Metadata["workspace_repo"] = repo
-	}
+// SubmitRequest holds the parameters for a new session submission.
+type SubmitRequest struct {
+	UserID       string
+	Prompt       string
+	ContinueFrom string // parent session ID; if set, artifacts are inherited
+	Repo         string // e.g. "github.com/shiblon/agentq"; stored as workspace_repo
+	HumanToken   string // raw bearer token; stored for delegated agent token exchange
+	Compact      bool   // hint to supervisor to summarize inherited context
+}
 
-	if continueFrom != "" {
-		parent, err := st.GetSession(ctx, continueFrom)
+// SubmitSession creates a new session and enqueues it for the supervisor.
+func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, req SubmitRequest) (*SubmitResult, error) {
+	session := models.NewSession(req.UserID, req.Prompt)
+	session.Meta.WorkspaceRepo = req.Repo
+	session.Meta.HumanToken = req.HumanToken
+
+	if req.ContinueFrom != "" {
+		parent, err := st.GetSession(ctx, req.ContinueFrom)
 		if err != nil {
-			return nil, fmt.Errorf("load parent session %s: %w", continueFrom, err)
+			return nil, fmt.Errorf("load parent session %s: %w", req.ContinueFrom, err)
 		}
-		session.ParentSessionID = continueFrom
-		if compact {
-			session.Metadata["compact_inherited"] = true
-		}
+		session.ParentSessionID = req.ContinueFrom
+		session.Meta.CompactInherited = req.Compact
 		for _, a := range parent.Artifacts {
 			// Skip supervisor dispatch artifacts -- routing decisions, not useful work.
 			if a.AgentName == "supervisor" {
@@ -47,7 +49,7 @@ func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, user
 			}
 			session.Artifacts = append(session.Artifacts, models.InheritedArtifact(session.ID, a))
 		}
-		log.Printf("workflow: continuing from %s, inherited %d artifact(s)", continueFrom, len(session.Artifacts))
+		log.Printf("workflow: continuing from %s, inherited %d artifact(s)", req.ContinueFrom, len(session.Artifacts))
 	}
 
 	if err := st.PutSession(ctx, session); err != nil {

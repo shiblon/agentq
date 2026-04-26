@@ -60,6 +60,45 @@
   overflow-y: auto;
 }
 
+.review-actions {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.review-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  resize: vertical;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.review-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-approve, .btn-reject {
+  padding: 0.4rem 1rem;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+.btn-approve { background: #2f9e44; color: #fff; }
+.btn-approve:hover:not(:disabled) { background: #2b8a3e; }
+.btn-reject  { background: #e03131; color: #fff; }
+.btn-reject:hover:not(:disabled)  { background: #c92a2a; }
+.btn-approve:disabled, .btn-reject:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .review-task-id {
   padding: 4px 12px;
   font-size: 0.75rem;

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -103,7 +102,7 @@ func printShortSession(s *models.Session) {
 		parent = fmt.Sprintf(" (continues %s)", s.ParentSessionID)
 	}
 	fmt.Printf("session %s  [%s]%s\n", s.ID, s.Status, parent)
-	fmt.Printf("  prompt: %s\n", truncateDisplay(s.Prompt, 80))
+	fmt.Printf("  prompt: %s\n", truncate(s.Prompt, 80))
 
 	if len(s.Artifacts) == 0 {
 		fmt.Println("  (no artifacts)")
@@ -117,7 +116,7 @@ func printShortSession(s *models.Session) {
 		if a.OriginSessionID != "" {
 			origin = " [inherited]"
 		}
-		snippet := truncateDisplay(strings.ReplaceAll(a.Content, "\n", " "), 60)
+		snippet := truncate(a.Content, 60)
 		fmt.Fprintf(w, "  %s\t[%s/%s%s]\t%s\n", age, a.AgentName, a.Type, origin, snippet)
 	}
 	w.Flush()

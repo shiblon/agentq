@@ -1,9 +1,10 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
+	"log"
 
+	"github.com/shiblon/agentq/pkg/auth"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/agentq/pkg/workflow"
 	"github.com/shiblon/entroq"
@@ -41,7 +42,7 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	compact, _ := cmd.Flags().GetBool("compact")
 	repo := viper.GetString("submit_repo")
 
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
 	if err != nil {
@@ -49,8 +50,23 @@ func runSubmit(cmd *cobra.Command, args []string) error {
 	}
 	defer eq.Close()
 
+	// Load stored credentials so the supervisor can exchange them for an agent token.
+	var humanToken string
+	if creds, err := auth.LoadCredentials(); err != nil {
+		log.Printf("warning: could not load credentials: %v", err)
+	} else if creds.Valid() {
+		humanToken = creds.AccessToken
+	}
+
 	st := store.New(eq)
-	result, err := workflow.SubmitSession(ctx, st, eq, userID, prompt, continueFrom, repo, compact)
+	result, err := workflow.SubmitSession(ctx, st, eq, workflow.SubmitRequest{
+		UserID:       userID,
+		Prompt:       prompt,
+		ContinueFrom: continueFrom,
+		Repo:         repo,
+		HumanToken:   humanToken,
+		Compact:      compact,
+	})
 	if err != nil {
 		return err
 	}

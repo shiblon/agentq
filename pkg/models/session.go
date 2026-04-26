@@ -1,41 +1,69 @@
 package models
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
-	"math/rand"
+	"log"
 	"time"
 )
 
-// generateID returns a random 64-bit hex string suitable for use as an ID.
-func generateID() string {
-	return fmt.Sprintf("%016x", rand.Uint64())
+// generateID returns a cryptographically random 64-bit hex string.
+func generateID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%016x", binary.BigEndian.Uint64(b[:])), nil
+}
+
+// mustGenerateID calls generateID and fatals if the OS entropy source fails.
+// crypto/rand failure indicates a broken system, so continuing is not meaningful.
+func mustGenerateID() string {
+	id, err := generateID()
+	if err != nil {
+		log.Fatalf("models: crypto/rand read failed: %v", err)
+	}
+	return id
+}
+
+// SessionMeta holds well-known session metadata fields. Using a typed struct
+// rather than map[string]any prevents type-assertion bugs and documents the schema.
+type SessionMeta struct {
+	// CompactInherited tells the supervisor to summarize inherited artifacts
+	// into a single compact_summary on its first dispatch.
+	CompactInherited bool `json:"compact_inherited,omitempty"`
+	// HumanToken is the raw bearer token from the submitting user, held only
+	// long enough for the supervisor to perform RFC 8693 token exchange.
+	HumanToken string `json:"human_token,omitempty"`
+	// WorkspaceRepo is the target repository path agents should work in.
+	WorkspaceRepo string `json:"workspace_repo,omitempty"`
 }
 
 // Session represents a user-initiated workflow with session context.
 // It tracks artifacts produced, and provides context for routing decisions.
 type Session struct {
-	ID              string         `json:"id"`
-	UserID          string         `json:"user_id"`                    // who initiated this
-	Prompt          string         `json:"prompt"`                     // the initial user request
-	ParentSessionID string         `json:"parent_session_id,omitempty"` // set when continued from another session
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	Status          string         `json:"status"`    // pending, in_progress, completed, failed
-	Artifacts       []Artifact     `json:"artifacts"` // artifacts produced so far
-	Metadata        map[string]any `json:"metadata"`  // arbitrary session data
+	ID              string     `json:"id"`
+	UserID          string     `json:"user_id"`
+	Prompt          string     `json:"prompt"`
+	ParentSessionID string     `json:"parent_session_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	Status          string     `json:"status"` // pending, in_progress, completed, failed, cancelled, awaiting_review
+	Artifacts       []Artifact `json:"artifacts"`
+	Meta            SessionMeta `json:"metadata"` // JSON key kept as "metadata" for wire compat
 }
 
 // NewSession creates a new session for a user prompt.
 func NewSession(userID, prompt string) *Session {
 	return &Session{
-		ID:        generateID(),
+		ID:        mustGenerateID(),
 		UserID:    userID,
 		Prompt:    prompt,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Status:    "pending",
 		Artifacts: []Artifact{},
-		Metadata:  make(map[string]any),
 	}
 }
 
@@ -58,7 +86,7 @@ func NewArtifact(sessionID, agentName, artifactType, content string) *Artifact {
 	ts := time.Now()
 	path := formatArtifactPath(sessionID, ts, agentName, artifactType)
 	return &Artifact{
-		ID:        generateID(),
+		ID:        mustGenerateID(),
 		SessionID: sessionID,
 		AgentName: agentName,
 		Type:      artifactType,
@@ -78,7 +106,7 @@ func InheritedArtifact(newSessionID string, src Artifact) Artifact {
 	}
 	ts := time.Now()
 	return Artifact{
-		ID:              generateID(),
+		ID:              mustGenerateID(),
 		SessionID:       newSessionID,
 		OriginSessionID: origin,
 		AgentName:       src.AgentName,

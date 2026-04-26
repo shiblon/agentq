@@ -1,12 +1,10 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"github.com/shiblon/agentq/pkg/models"
-	"github.com/shiblon/entroq"
 )
 
 // queueInfo is returned by GET /api/v1/queues.
@@ -42,28 +40,35 @@ type reviewItem struct {
 }
 
 func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.eq.Tasks(r.Context(), "human_review")
-	if err != nil {
-		// human_review queue may not exist yet; return empty list.
-		if entroq.IsCanceled(err) || len(tasks) == 0 && err != nil {
-			writeJSON(w, http.StatusOK, []reviewItem{})
-			return
-		}
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list review tasks: %v", err))
-		return
-	}
-
-	items := make([]reviewItem, 0, len(tasks))
-	for _, t := range tasks {
-		var req models.HumanReviewRequest
-		if err := json.Unmarshal(t.Value, &req); err != nil {
-			continue // skip malformed tasks
-		}
-		items = append(items, reviewItem{
-			TaskID:  t.ID,
-			At:      t.At.Format("2006-01-02T15:04:05Z07:00"),
-			Request: req,
-		})
+	items := s.reviews.list(r.Context())
+	if items == nil {
+		items = []reviewItem{}
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+type reviewActionRequest struct {
+	HumanInput string `json:"human_input"`
+}
+
+func (s *Server) handleReviewApprove(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("task_id")
+	var body reviewActionRequest
+	_ = readJSON(r, &body) // input is optional
+	if err := s.reviews.process(r.Context(), taskID, "approved", body.HumanInput); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"outcome": "approved"})
+}
+
+func (s *Server) handleReviewReject(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("task_id")
+	var body reviewActionRequest
+	_ = readJSON(r, &body) // input is optional
+	if err := s.reviews.process(r.Context(), taskID, "rejected", body.HumanInput); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"outcome": "rejected"})
 }

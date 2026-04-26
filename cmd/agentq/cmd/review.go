@@ -128,7 +128,7 @@ func printReviewRequest(req models.HumanReviewRequest, st *store.Store, ctx cont
 					origin = fmt.Sprintf(" (from %s)", a.OriginSessionID)
 				}
 				fmt.Printf("  [%s/%s%s] %s\n", a.AgentName, a.Type, origin,
-					truncateStr(a.Content, 200))
+					truncate(a.Content, 200))
 			}
 		}
 	}
@@ -155,10 +155,3 @@ func promptReviewer(scanner *bufio.Scanner) (outcome, humanInput string) {
 	}
 }
 
-func truncateStr(s string, n int) string {
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n]) + "..."
-}

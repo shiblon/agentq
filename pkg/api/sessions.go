@@ -37,6 +37,8 @@ func summarize(s *models.Session) sessionSummary {
 }
 
 // submitRequest is the body for POST /api/v1/sessions.
+// UserID is ignored when authentication is enabled; the validated token's
+// subject claim is used instead.
 type submitRequest struct {
 	Prompt       string `json:"prompt"`
 	UserID       string `json:"user_id"`
@@ -89,11 +91,22 @@ func (s *Server) handleSessionsSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
-	if req.UserID == "" {
+	// Prefer the validated token subject over the request body value.
+	// Falls back to req.UserID for unauthenticated dev mode, then "api".
+	if claims := ClaimsFromContext(r.Context()); claims != nil {
+		req.UserID = claims.Subject
+	} else if req.UserID == "" {
 		req.UserID = "api"
 	}
 
-	result, err := workflow.SubmitSession(r.Context(), s.store, s.eq, req.UserID, req.Prompt, req.ContinueFrom, req.Repo, req.Compact)
+	result, err := workflow.SubmitSession(r.Context(), s.store, s.eq, workflow.SubmitRequest{
+		UserID:       req.UserID,
+		Prompt:       req.Prompt,
+		ContinueFrom: req.ContinueFrom,
+		Repo:         req.Repo,
+		HumanToken:   BearerToken(r),
+		Compact:      req.Compact,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("submit session: %v", err))
 		return
@@ -104,6 +117,22 @@ func (s *Server) handleSessionsSubmit(w http.ResponseWriter, r *http.Request) {
 		SessionURI: result.SessionURI,
 		Status:     "pending",
 	})
+}
+
+func (s *Server) handleSessionsCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.UpdateSession(r.Context(), id, func(session *models.Session) error {
+		switch session.Status {
+		case "completed", "cancelled":
+			return fmt.Errorf("session already %s", session.Status)
+		}
+		session.Status = "cancelled"
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("cancel session: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
 func (s *Server) handleSessionsGet(w http.ResponseWriter, r *http.Request) {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -79,7 +78,7 @@ func runSessionsList(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(w, "SESSION ID\tSTATUS\tAGO\tPROMPT")
 	for _, s := range sessions {
 		ago := formatAge(time.Since(s.UpdatedAt))
-		prompt := truncateDisplay(s.Prompt, 50)
+		prompt := truncate(s.Prompt, 50)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.ID, s.Status, ago, prompt)
 	}
 	return w.Flush()
@@ -99,14 +98,3 @@ func formatAge(d time.Duration) string {
 	}
 }
 
-// truncateStr is also defined in review.go; use a shared one here.
-// (review.go has the same helper -- they can coexist in the same package
-// since Go doesn't allow duplicate top-level names; use a unique name.)
-func truncateDisplay(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n]) + "..."
-}

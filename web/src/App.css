@@ -1,1 +1,28 @@
 /* App-level overrides (most styles live in index.css or per-component CSS) */
+
+.app-loading, .app-login {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 1.5rem;
+  color: var(--color-muted);
+}
+
+.app-login h1 {
+  font-size: 2rem;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.btn-primary {
+  padding: 0.6rem 1.6rem;
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  cursor: pointer;
+}
+.btn-primary:hover { opacity: 0.88; }

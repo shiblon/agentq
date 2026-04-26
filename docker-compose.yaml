@@ -31,9 +31,45 @@ services:
     volumes:
       - ${OLLAMA_MODELS:-/tmp/agentq-ollama-models}:/root/.ollama
 
+  # HTTP API server. JWT issuer must match what Zitadel puts in tokens, which
+  # is the *external* URL (http://localhost:8080), not the container-internal
+  # one. The JWKS endpoint is fetched internally via the container network.
+  api:
+    <<: *build
+    command:
+      - api
+      - --eq-addr=eq:37706
+      - --addr=:8090
+      - --jwks-url=http://zitadel:8080/oauth/v2/keys
+      - --issuer=http://localhost:8080
+    ports:
+      - "8090:8090"
+    depends_on:
+      eq:
+        condition: service_started
+      zitadel:
+        condition: service_healthy
+    environment:
+      AGENTQ_EQ_ADDR: eq:37706
+
   supervisor:
     <<: *agent
-    command: ["run", "--agent=supervisor", "--eq-addr=eq:37706"]
+    command:
+      - run
+      - --agent=supervisor
+      - --eq-addr=eq:37706
+      - --token-url=http://zitadel:8080/oauth/v2/token
+    depends_on:
+      eq:
+        condition: service_started
+      zitadel:
+        condition: service_healthy
+    environment:
+      AGENTQ_EQ_ADDR: eq:37706
+      AGENTQ_LLM_ADDR: http://ollama:11434
+      # Populated by deploy/zitadel-bootstrap.sh output.
+      AGENTQ_CLIENT_ID: ${SUPERVISOR_CLIENT_ID:-}
+      AGENTQ_CLIENT_SECRET: ${SUPERVISOR_CLIENT_SECRET:-}
 
   coder:
     <<: *agent
@@ -89,7 +125,29 @@ services:
     volumes:
       - minio-data:/data
 
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:latest
+    command: start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled
+    environment:
+      ZITADEL_DATABASE_SQLITE_HOST: /data/zitadel.db
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_EXTERNALPORT: "8080"
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: "Password1!"
+    ports:
+      - "8080:8080"
+    volumes:
+      - zitadel-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/debug/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
 volumes:
   eq-journal:
   gitea-data:
   minio-data:
+  zitadel-data:

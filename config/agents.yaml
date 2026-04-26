@@ -1,17 +1,60 @@
-# config/agents.yaml -- example agent configuration.
-# Copy and adapt this file, then run:
-#   ./agentq run --config config/agents.yaml
+# config/agents.yaml -- agentq agent configuration.
+#
+# Run all agents in one command:
+#   agentq run --all --config config/agents.yaml
+#
+# Or run individual agents:
+#   agentq run --agent supervisor --config config/agents.yaml
+#   agentq run --agent coder      --config config/agents.yaml
+#
+# The supervisor uses an LLM to route tasks between agents:
+#   agentq run --agent supervisor --llm-addr http://localhost:11434 --llm-model llama3
+#
+# Token exchange (delegates human identity to agents):
+#   agentq run --agent supervisor \
+#     --token-url http://localhost:8080/oauth/v2/token \
+#     --client-id <supervisor-client-id> \
+#     --client-secret <supervisor-client-secret>
 
 # rubric: tells the supervisor when it can auto-approve tool-use requests,
-# when to escalate for human review, and what to always reject.
+# when to escalate to the human_review queue, and what to always block.
+# Keep this short -- it is injected into the supervisor's system prompt.
 rubric: |
-  Auto-approve read-only actions: file reads, directory listings, web searches.
-  Escalate any request to write files, run shell commands, or modify the environment.
-  Always reject requests to delete files or run commands with destructive flags.
+  Auto-approve: reading files, searching, running tests, web lookups.
+  Escalate to human review only when an action is truly irreversible and
+  cannot be delegated to another agent (e.g. a production deployment that
+  requires clicking a button in an external console).
+  Reject: deleting files without explicit user instruction, running commands
+  with destructive flags (--force, --hard-reset, DROP TABLE, etc.).
+
+# workspace: shared file system used by all agents.
+# Agents clone target repos here; the self repo holds prompts and this config.
+# workspace:
+#   root: /tmp/agentq-workspace        # or set AGENTQ_WORKSPACE
+#   self: github.com/your-org/agentq-config  # or set AGENTQ_SELF
 
 agents:
+  # coder: primary implementation agent.
+  # Runs Claude Code in headless mode; reads its prompt from config/prompts/coder.txt.
   - name: coder
     queue: coder_queue
-    description: Writes, reads, and edits code based on a task description.
+    description: Writes, reads, and edits source code to implement a task.
+    prompt_file: config/prompts/coder.txt
     cmd: claude --print
+    # approval_suffix is appended to cmd when the supervisor grants elevated
+    # permissions (approved_actions in the task payload).
     approval_suffix: --dangerously-skip-permissions
+
+  # reviewer: checks the coder's output for correctness and style.
+  - name: reviewer
+    queue: reviewer_queue
+    description: Reviews code written by the coder for correctness, style, and tests.
+    prompt_file: config/prompts/reviewer.txt
+    cmd: claude --print
+
+  # researcher: looks things up without touching the codebase.
+  - name: researcher
+    queue: researcher_queue
+    description: Researches questions using web search and documentation lookup.
+    prompt_file: config/prompts/researcher.txt
+    cmd: claude --print

@@ -116,6 +116,34 @@ func (c *Config) ResolvedWorkspace() WorkspaceConfig {
 	return w
 }
 
+// Update replaces a named agent's fields with any non-empty values from patch.
+// Fields left empty in patch retain their current values.
+// Returns an error if the agent is not found.
+func (c *Config) Update(name string, patch Agent) error {
+	for i, a := range c.Agents {
+		if a.Name != name {
+			continue
+		}
+		if patch.Queue != "" {
+			c.Agents[i].Queue = patch.Queue
+		}
+		if patch.Description != "" {
+			c.Agents[i].Description = patch.Description
+		}
+		if patch.PromptFile != "" {
+			c.Agents[i].PromptFile = patch.PromptFile
+		}
+		if patch.Cmd != "" {
+			c.Agents[i].Cmd = patch.Cmd
+		}
+		if patch.ApprovalSuffix != "" {
+			c.Agents[i].ApprovalSuffix = patch.ApprovalSuffix
+		}
+		return nil
+	}
+	return fmt.Errorf("agent %q not found", name)
+}
+
 // Get returns the named agent and true, or zero value and false if not found.
 func (c *Config) Get(name string) (Agent, bool) {
 	for _, a := range c.Agents {

@@ -20,8 +20,10 @@ agents, and review tasks. The API is the backend for the web UI.
 
 Endpoints:
   GET    /api/v1/health
+  GET    /api/v1/config
   GET    /api/v1/sessions[?status=&limit=]
   POST   /api/v1/sessions
+  POST   /api/v1/sessions/{id}/cancel
   GET    /api/v1/sessions/{id}
   GET    /api/v1/sessions/{id}/chain
   GET    /api/v1/sessions/{id}/result
@@ -29,7 +31,9 @@ Endpoints:
   POST   /api/v1/agents
   DELETE /api/v1/agents/{name}
   GET    /api/v1/queues
-  GET    /api/v1/review`,
+  GET    /api/v1/review
+  POST   /api/v1/review/{task_id}/approve
+  POST   /api/v1/review/{task_id}/reject`,
 	RunE: runAPI,
 }
 
@@ -37,8 +41,18 @@ func init() {
 	rootCmd.AddCommand(apiCmd)
 	apiCmd.Flags().String("addr", ":8080", "Address to listen on (env: AGENTQ_API_ADDR)")
 	apiCmd.Flags().String("static-dir", "", "Serve web UI static files from this directory (e.g. web/dist)")
+	apiCmd.Flags().String("jwks-url", "", "JWKS endpoint URL for JWT validation (e.g. http://localhost:8080/oauth/v2/keys)")
+	apiCmd.Flags().String("issuer", "", "Expected JWT issuer (iss claim); must match jwks-url host")
+	apiCmd.Flags().String("policy-dir", "", "Directory containing .rego policy files; defaults to embedded policy")
+	apiCmd.Flags().String("oidc-client-id", "", "Browser PKCE client ID forwarded to the web UI (env: AGENTQ_OIDC_CLIENT_ID)")
+	apiCmd.Flags().Bool("no-auth", false, "Disable authentication (local development only; binds to localhost)")
 	viper.BindPFlag("api_addr", apiCmd.Flags().Lookup("addr"))
 	viper.BindPFlag("api_static_dir", apiCmd.Flags().Lookup("static-dir"))
+	viper.BindPFlag("api_jwks_url", apiCmd.Flags().Lookup("jwks-url"))
+	viper.BindPFlag("api_issuer", apiCmd.Flags().Lookup("issuer"))
+	viper.BindPFlag("api_policy_dir", apiCmd.Flags().Lookup("policy-dir"))
+	viper.BindPFlag("api_oidc_client_id", apiCmd.Flags().Lookup("oidc-client-id"))
+	viper.BindPFlag("api_no_auth", apiCmd.Flags().Lookup("no-auth"))
 }
 
 func runAPI(cmd *cobra.Command, args []string) error {
@@ -46,6 +60,15 @@ func runAPI(cmd *cobra.Command, args []string) error {
 	eqAddr := viper.GetString("eq_addr")
 	configFile := viper.GetString("config")
 	staticDir := viper.GetString("api_static_dir")
+	jwksURL := viper.GetString("api_jwks_url")
+	issuer := viper.GetString("api_issuer")
+	policyDir := viper.GetString("api_policy_dir")
+	oidcClientID := viper.GetString("api_oidc_client_id")
+	noAuth := viper.GetBool("api_no_auth")
+
+	if jwksURL == "" && !noAuth {
+		return fmt.Errorf("authentication is required: set --jwks-url or pass --no-auth to explicitly disable (local development only)")
+	}
 
 	ctx := cmd.Context()
 
@@ -56,10 +79,51 @@ func runAPI(cmd *cobra.Command, args []string) error {
 	defer eq.Close()
 
 	var opts []agentqapi.Option
+
 	if staticDir != "" {
 		opts = append(opts, agentqapi.WithStaticDir(staticDir))
 		log.Printf("serving web UI from %s", staticDir)
 	}
+
+	if issuer != "" {
+		opts = append(opts, agentqapi.WithIssuer(issuer))
+	}
+	if oidcClientID != "" {
+		opts = append(opts, agentqapi.WithOIDCClientID(oidcClientID))
+	}
+
+	if jwksURL != "" {
+		if issuer == "" {
+			return fmt.Errorf("--issuer is required when --jwks-url is set")
+		}
+		v := agentqapi.NewJWKSValidator(jwksURL, issuer)
+		opts = append(opts, agentqapi.WithJWKSValidator(v))
+		log.Printf("JWT validation enabled: jwks=%s issuer=%s", jwksURL, issuer)
+
+		var authorizer *agentqapi.OPAAuthorizer
+		if policyDir != "" {
+			authorizer, err = agentqapi.NewOPAAuthorizerFromPaths(ctx, policyDir)
+			if err != nil {
+				return fmt.Errorf("load opa policy from %s: %w", policyDir, err)
+			}
+			log.Printf("OPA policy loaded from %s", policyDir)
+		} else {
+			authorizer, err = agentqapi.NewOPAAuthorizerDefault(ctx)
+			if err != nil {
+				return fmt.Errorf("load embedded opa policy: %w", err)
+			}
+			log.Printf("OPA policy: using embedded default")
+		}
+		opts = append(opts, agentqapi.WithAuthorizer(authorizer))
+	} else {
+		// --no-auth was explicitly set; restrict to loopback so the open
+		// server is never accidentally reachable from the network.
+		if addr == ":8080" {
+			addr = "127.0.0.1:8080"
+		}
+		log.Printf("WARNING: authentication disabled (--no-auth); listening on %s only", addr)
+	}
+
 	srv := agentqapi.New(eq, configFile, opts...)
 	log.Printf("api server listening on %s", addr)
 	return http.ListenAndServe(addr, srv.Handler())

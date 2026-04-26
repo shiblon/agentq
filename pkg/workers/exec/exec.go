@@ -113,7 +113,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 			// Non-fatal: log and continue with potentially stale prompts.
 			log.Printf("exec %s: pull self repo: %v", w.name, err)
 		}
-		if repoPath, _ := session.Metadata["workspace_repo"].(string); repoPath != "" {
+		if repoPath := session.Meta.WorkspaceRepo; repoPath != "" {
 			dir, err := w.ws.PrepareRepo(ctx, repoPath, "")
 			if err != nil {
 				return nil, fmt.Errorf("exec %s: prepare repo %q: %w", w.name, repoPath, err)
@@ -129,7 +129,8 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 
 	input := buildInput(systemPrompt, session)
 
-	output, err := w.runCmd(ctx, cmd, workDir, input)
+	agentToken, _ := appTask.Payload["agent_token"].(string)
+	output, err := w.runCmd(ctx, cmd, workDir, agentToken, input)
 	if err != nil {
 		return nil, fmt.Errorf("exec %s: %w", w.name, err)
 	}
@@ -190,12 +191,15 @@ func (w *Worker) loadPrompt(ctx context.Context) (string, error) {
 
 // runCmd runs shellCmd via sh -c with input on stdin. workDir sets the working
 // directory; empty string means inherit the process working directory.
-func (w *Worker) runCmd(ctx context.Context, shellCmd, workDir, input string) (string, error) {
+// agentToken, if non-empty, is passed as AGENTQ_TOKEN in the subprocess
+// environment so the agent can authenticate back to the agentq API.
+func (w *Worker) runCmd(ctx context.Context, shellCmd, workDir, agentToken, input string) (string, error) {
 	cmd := osexec.CommandContext(ctx, "sh", "-c", shellCmd)
 	cmd.Stdin = strings.NewReader(input)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	cmd.Env = envWithToken(agentToken)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -203,6 +207,22 @@ func (w *Worker) runCmd(ctx context.Context, shellCmd, workDir, input string) (s
 		return "", fmt.Errorf("command %q failed: %w\nstderr: %s", w.cmd, err, stderr.String())
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// envWithToken returns os.Environ() with AGENTQ_TOKEN set if token is non-empty.
+func envWithToken(token string) []string {
+	env := os.Environ()
+	if token == "" {
+		return env
+	}
+	// Replace any existing AGENTQ_TOKEN entry.
+	result := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "AGENTQ_TOKEN=") {
+			result = append(result, e)
+		}
+	}
+	return append(result, "AGENTQ_TOKEN="+token)
 }
 
 // hasApproval reports whether the task payload contains a non-empty

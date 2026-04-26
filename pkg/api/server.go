@@ -14,11 +14,15 @@ import (
 
 // Server holds shared dependencies for all API handlers.
 type Server struct {
-	eq         *entroq.EntroQ
-	store      *store.Store
-	configFile string // path to agents.yaml; reloaded per-request for mutations
-	auth       Authorizer
-	staticDir  string // if set, serves static files (web UI) from this directory
+	eq           *entroq.EntroQ
+	store        *store.Store
+	configFile   string // path to agents.yaml; reloaded per-request for mutations
+	auth         Authorizer
+	validator    *JWKSValidator // nil means no authn enforcement
+	issuer       string         // OIDC issuer URL, forwarded to the frontend via /api/v1/config
+	oidcClientID string         // browser PKCE client ID, forwarded to the frontend
+	staticDir    string         // if set, serves static files (web UI) from this directory
+	reviews      *reviewStore
 }
 
 // Option configures a Server.
@@ -27,6 +31,22 @@ type Option func(*Server)
 // WithAuthorizer sets the request authorizer. Defaults to AllowAll.
 func WithAuthorizer(a Authorizer) Option {
 	return func(s *Server) { s.auth = a }
+}
+
+// WithJWKSValidator enables JWT authentication. When set, requests without a
+// valid token receive 401 before reaching the authorizer.
+func WithJWKSValidator(v *JWKSValidator) Option {
+	return func(s *Server) { s.validator = v }
+}
+
+// WithIssuer sets the OIDC issuer URL forwarded to the browser via /api/v1/config.
+func WithIssuer(issuer string) Option {
+	return func(s *Server) { s.issuer = issuer }
+}
+
+// WithOIDCClientID sets the browser PKCE client ID forwarded to the frontend.
+func WithOIDCClientID(id string) Option {
+	return func(s *Server) { s.oidcClientID = id }
 }
 
 // WithStaticDir serves static files from dir at the root path, with SPA
@@ -43,6 +63,7 @@ func New(eq *entroq.EntroQ, configFile string, opts ...Option) *Server {
 		store:      store.New(eq),
 		configFile: configFile,
 		auth:       AllowAll{},
+		reviews:    newReviewStore(eq),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -54,12 +75,14 @@ func New(eq *entroq.EntroQ, configFile string, opts ...Option) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Health
+	// Health and config (unauthenticated -- see unauthenticatedPaths in authn.go)
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/config", s.handleConfig)
 
 	// Sessions
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessionsList)
 	mux.HandleFunc("POST /api/v1/sessions", s.handleSessionsSubmit)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/cancel", s.handleSessionsCancel)
 	mux.HandleFunc("GET /api/v1/sessions/{id}", s.handleSessionsGet)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/chain", s.handleSessionsChain)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/result", s.handleSessionsResult)
@@ -72,6 +95,8 @@ func (s *Server) Handler() http.Handler {
 	// Queues and review
 	mux.HandleFunc("GET /api/v1/queues", s.handleQueuesList)
 	mux.HandleFunc("GET /api/v1/review", s.handleReviewList)
+	mux.HandleFunc("POST /api/v1/review/{task_id}/approve", s.handleReviewApprove)
+	mux.HandleFunc("POST /api/v1/review/{task_id}/reject", s.handleReviewReject)
 
 	// Static file serving with SPA fallback (only when configured).
 	if s.staticDir != "" {
@@ -88,9 +113,14 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 
-	// Apply middleware: logging -> CORS -> auth -> mux
+	// Apply middleware: logging -> CORS -> authn -> authz -> mux
+	// Health endpoint is exempt from authentication so liveness checks work
+	// without credentials.
 	var h http.Handler = mux
 	h = authMiddleware(s.auth)(h)
+	if s.validator != nil {
+		h = authnMiddleware(s.validator)(h)
+	}
 	h = corsMiddleware(h)
 	h = loggingMiddleware(h)
 	return h

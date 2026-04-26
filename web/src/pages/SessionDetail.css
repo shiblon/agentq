@@ -7,6 +7,19 @@
   padding: 0;
 }
 
+.btn-cancel {
+  margin-left: auto;
+  padding: 0.3rem 0.8rem;
+  background: none;
+  border: 1px solid #e03131;
+  color: #e03131;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.btn-cancel:hover:not(:disabled) { background: #fff5f5; }
+.btn-cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .chain-nav {
   display: flex;
   gap: 0.5rem;

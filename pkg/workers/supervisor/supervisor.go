@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
+	"github.com/shiblon/agentq/pkg/auth"
 	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/llm"
 	"github.com/shiblon/agentq/pkg/models"
@@ -67,12 +69,13 @@ type routeDecision struct {
 // Supervisor is the trampoline orchestrator. It accepts a task, consults the
 // LLM to decide which specialist to invoke next, and enqueues that work.
 type Supervisor struct {
-	client *entroq.EntroQ
-	store  *store.Store
-	config *models.AgentConfig
-	llm    llm.Client
-	agents []config.Agent
-	rubric string
+	client    *entroq.EntroQ
+	store     *store.Store
+	config    *models.AgentConfig
+	llm       llm.Client
+	agents    []config.Agent
+	rubric    string
+	exchanger *auth.TokenExchanger // nil means no token exchange
 }
 
 // Option is a functional option for configuring a Supervisor.
@@ -130,6 +133,15 @@ func WithRubric(rubric string) Option {
 	return func(s *Supervisor) { s.rubric = rubric }
 }
 
+// WithTokenExchanger enables delegated token issuance. When set, the supervisor
+// exchanges the session's human token for a short-lived delegated agent token
+// before dispatching each specialist task. The agent token is placed in the
+// task payload under "agent_token" so the exec worker can pass it to the
+// subprocess as AGENTQ_TOKEN.
+func WithTokenExchanger(e *auth.TokenExchanger) Option {
+	return func(s *Supervisor) { s.exchanger = e }
+}
+
 // ProcessTask handles an incoming supervisor task. It peeks at the message
 // type to distinguish normal dispatches from human-review replies.
 func (s *Supervisor) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
@@ -144,6 +156,38 @@ func (s *Supervisor) ProcessTask(ctx context.Context, task *entroq.Task) ([]entr
 	return s.handleDispatch(ctx, task)
 }
 
+// exchangeToken attempts to exchange the human token stored in session metadata
+// for a delegated agent token. Returns empty string if exchange is not
+// configured or the session carries no token -- callers should treat that as
+// "run without a token" rather than an error.
+//
+// On a successful exchange the human token is cleared from the session so it
+// does not persist in the document store beyond the first use.
+func (s *Supervisor) exchangeToken(ctx context.Context, session *models.Session) string {
+	if s.exchanger == nil {
+		return ""
+	}
+	humanToken := session.Meta.HumanToken
+	if humanToken == "" {
+		return ""
+	}
+	tok, err := s.exchanger.Exchange(ctx, humanToken)
+	if err != nil {
+		log.Printf("supervisor: token exchange for session %s: %v (continuing without token)", session.ID, err)
+		return ""
+	}
+	// Clear the human token now that we have an agent token. Non-fatal if the
+	// update fails -- the token will be ignored on the next exchange attempt
+	// since the exchanger will have already consumed it.
+	if err := s.store.UpdateSession(ctx, session.ID, func(s *models.Session) error {
+		s.Meta.HumanToken = ""
+		return nil
+	}); err != nil {
+		log.Printf("supervisor: clear human token for session %s: %v", session.ID, err)
+	}
+	return tok.AccessToken
+}
+
 // handleDispatch processes a normal agent task: loads the session, decides
 // the next step, and returns the appropriate queue modifications.
 func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
@@ -153,6 +197,20 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 	}
 
 	sessionID := appTask.SessionURI[len("doc:sessions/"):]
+
+	// Drop tasks for cancelled sessions immediately without processing.
+	{
+		session, err := s.store.GetSession(ctx, sessionID)
+		if err == nil && session.Status == "cancelled" {
+			log.Printf("supervisor: session %s is cancelled, dropping task", sessionID)
+			return []entroq.ModifyArg{task.Delete()}, nil
+		}
+	}
+
+	// Compact inherited artifacts into a single summary (once per session).
+	if err := s.maybeCompactInherited(ctx, sessionID); err != nil {
+		log.Printf("supervisor: compact inherited for session %s: %v (continuing)", sessionID, err)
+	}
 
 	var decision routeDecision
 	if err := s.store.UpdateSession(ctx, sessionID, func(session *models.Session) error {
@@ -175,6 +233,14 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		return nil, fmt.Errorf("handleDispatch: update session: %w", err)
 	}
 
+	// Exchange a delegated agent token before dispatching. Non-fatal: if
+	// exchange is not configured or fails, agents run without a token.
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("handleDispatch: get session for token exchange: %w", err)
+	}
+	agentToken := s.exchangeToken(ctx, session)
+
 	mods := []entroq.ModifyArg{task.Delete()}
 
 	switch decision.Next {
@@ -186,10 +252,14 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		if outQueue == "" {
 			return nil, fmt.Errorf("re_dispatch: no queue for agent %q", decision.Agent)
 		}
-		child := models.NewTask(outQueue, appTask.SessionURI, map[string]any{
+		payload := map[string]any{
 			"agent":            decision.Agent,
 			"approved_actions": decision.ApprovedActions,
-		})
+		}
+		if agentToken != "" {
+			payload["agent_token"] = agentToken
+		}
+		child := models.NewTask(outQueue, appTask.SessionURI, payload)
 		childBytes, err := json.Marshal(child)
 		if err != nil {
 			return nil, fmt.Errorf("marshal re_dispatch task: %w", err)
@@ -197,14 +267,11 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		mods = append(mods, entroq.InsertingInto(outQueue, entroq.WithRawValue(childBytes)))
 
 	case "escalate":
-		// Build a review request. Load the session to get the last specialist
-		// artifact as context for the reviewer.
+		// Build a review request. The session was already loaded above.
 		var summary string
-		if reviewSession, err := s.store.GetSession(ctx, sessionID); err == nil {
-			latest := latestFreshByAgent(reviewSession)
-			if a, ok := latest[decision.Agent]; ok {
-				summary = truncate(a.Content, 500)
-			}
+		latest := latestFreshByAgent(session)
+		if a, ok := latest[decision.Agent]; ok {
+			summary = truncate(a.Content, 500)
 		}
 		req := &models.HumanReviewRequest{
 			SessionURI:      appTask.SessionURI,
@@ -225,9 +292,13 @@ func (s *Supervisor) handleDispatch(ctx context.Context, task *entroq.Task) ([]e
 		if outQueue == "" {
 			return nil, fmt.Errorf("no output queue for agent %q", decision.Next)
 		}
-		child := models.NewTask(outQueue, appTask.SessionURI, map[string]any{
+		payload := map[string]any{
 			"agent": decision.Next,
-		})
+		}
+		if agentToken != "" {
+			payload["agent_token"] = agentToken
+		}
+		child := models.NewTask(outQueue, appTask.SessionURI, payload)
 		childBytes, err := json.Marshal(child)
 		if err != nil {
 			return nil, fmt.Errorf("marshal child task for %s: %w", decision.Next, err)
@@ -272,11 +343,20 @@ func (s *Supervisor) handleReviewReply(ctx context.Context, task *entroq.Task) (
 		}); err != nil {
 			return nil, fmt.Errorf("handleReviewReply: record approval: %w", err)
 		}
-		child := models.NewTask(outQueue, reply.SessionURI, map[string]any{
+		replySession, _ := s.store.GetSession(ctx, sessionID)
+		var replyAgentToken string
+		if replySession != nil {
+			replyAgentToken = s.exchangeToken(ctx, replySession)
+		}
+		replyPayload := map[string]any{
 			"agent":            agentName,
 			"approved_actions": []string{"all"},
 			"human_input":      reply.HumanInput,
-		})
+		}
+		if replyAgentToken != "" {
+			replyPayload["agent_token"] = replyAgentToken
+		}
+		child := models.NewTask(outQueue, reply.SessionURI, replyPayload)
 		childBytes, err := json.Marshal(child)
 		if err != nil {
 			return nil, fmt.Errorf("marshal approved task: %w", err)
@@ -383,29 +463,106 @@ func (s *Supervisor) decideWithLLM(ctx context.Context, session *models.Session)
 	return d, nil
 }
 
+// maybeCompactInherited summarizes inherited artifacts into a single
+// supervisor/compact_summary artifact, but only when all of these hold:
+// - session metadata contains "compact_inherited": "true"
+// - an LLM is configured
+// - no compact_summary artifact already exists (idempotent)
+func (s *Supervisor) maybeCompactInherited(ctx context.Context, sessionID string) error {
+	if s.llm == nil {
+		return nil
+	}
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if !session.Meta.CompactInherited {
+		return nil
+	}
+	// Already compacted?
+	for _, a := range session.Artifacts {
+		if a.AgentName == "supervisor" && a.Type == "compact_summary" {
+			return nil
+		}
+	}
+
+	var inherited []models.Artifact
+	for _, a := range session.Artifacts {
+		if a.AgentName != "supervisor" && a.OriginSessionID != "" {
+			inherited = append(inherited, a)
+		}
+	}
+	if len(inherited) == 0 {
+		return nil
+	}
+
+	var raw strings.Builder
+	for _, a := range inherited {
+		fmt.Fprintf(&raw, "[%s/%s from session %s]\n%s\n\n",
+			a.AgentName, a.Type, a.OriginSessionID, a.Content)
+	}
+	summary, err := s.llm.Complete(ctx,
+		"You are a summarizer. Given a set of agent work artifacts from prior sessions, produce a concise summary (3-6 sentences) of what was accomplished and any key outputs or decisions. Omit metadata, focus on substance.",
+		"Artifacts to summarize:\n\n"+raw.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("llm compact: %w", err)
+	}
+
+	return s.store.UpdateSession(ctx, sessionID, func(session *models.Session) error {
+		session.Artifacts = append(session.Artifacts,
+			*models.NewArtifact(session.ID, "supervisor", "compact_summary", strings.TrimSpace(summary)))
+		return nil
+	})
+}
+
 // buildUserPrompt composes the context the LLM needs to make a routing decision.
 func buildUserPrompt(session *models.Session) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "User request: %s\n\n", session.Prompt)
 
-	var inherited, fresh []models.Artifact
+	// Use compact_summary if present (written by maybeCompactInherited).
+	var compactSummary string
+	for _, a := range session.Artifacts {
+		if a.AgentName == "supervisor" && a.Type == "compact_summary" {
+			compactSummary = a.Content
+			break
+		}
+	}
+
+	var fresh []models.Artifact
 	for _, a := range session.Artifacts {
 		if a.AgentName == "supervisor" {
 			continue
 		}
-		if a.OriginSessionID != "" {
-			inherited = append(inherited, a)
-		} else {
+		if a.OriginSessionID == "" {
 			fresh = append(fresh, a)
 		}
 	}
 
-	if len(inherited) == 0 && len(fresh) == 0 {
+	hasInherited := compactSummary != ""
+	if !hasInherited {
+		for _, a := range session.Artifacts {
+			if a.AgentName != "supervisor" && a.OriginSessionID != "" {
+				hasInherited = true
+				break
+			}
+		}
+	}
+
+	if !hasInherited && len(fresh) == 0 {
 		b.WriteString("Work done so far: none.\n")
 	} else {
-		if len(inherited) > 0 {
+		if compactSummary != "" {
+			b.WriteString("Prior session context (summary):\n")
+			b.WriteString(compactSummary)
+			b.WriteString("\n\n")
+		} else if hasInherited {
 			b.WriteString("Prior session context (inherited):\n")
-			for _, a := range inherited {
+			for _, a := range session.Artifacts {
+				if a.AgentName == "supervisor" || a.OriginSessionID == "" {
+					continue
+				}
 				fmt.Fprintf(&b, "- [%s/%s from session %s] %s\n",
 					a.AgentName, a.Type, a.OriginSessionID, a.Content)
 			}

@@ -20,6 +20,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,7 @@ func FromEnv() (*Workspace, bool) {
 	}
 	w, err := New(root, self)
 	if err != nil {
+		log.Printf("workspace: FromEnv: %v", err)
 		return nil, false
 	}
 	return w, true
@@ -132,8 +134,22 @@ func (w *Workspace) PrepareRepo(ctx context.Context, repoPath, remoteURL string)
 	return dir, nil
 }
 
+// sensitivePatterns is a list of file name patterns that CommitWork refuses to
+// stage. Any untracked file whose base name matches one of these is treated as
+// a potential credential leak and blocks the commit.
+var sensitivePatterns = []string{
+	".env", ".env.local", ".env.*",
+	"*.pem", "*.key", "*.p12", "*.pfx",
+	"credentials.json", "credentials.yaml", "credentials.yml",
+	"secrets.json", "secrets.yaml", "secrets.yml",
+	"*_rsa", "*_ecdsa", "*_ed25519",
+	"*.secret",
+}
+
 // CommitWork commits any changes in the target repo directory with the given
 // message, then pushes. A no-op (no error) if there is nothing to commit.
+// Returns an error (without staging anything) if any untracked file matches
+// a known sensitive filename pattern.
 func (w *Workspace) CommitWork(ctx context.Context, repoDir, message string) error {
 	changed, err := gitHasChanges(ctx, repoDir)
 	if err != nil {
@@ -142,6 +158,9 @@ func (w *Workspace) CommitWork(ctx context.Context, repoDir, message string) err
 	if !changed {
 		return nil
 	}
+	if err := checkSensitiveFiles(ctx, repoDir); err != nil {
+		return err
+	}
 	if err := gitAdd(ctx, repoDir); err != nil {
 		return err
 	}
@@ -149,4 +168,27 @@ func (w *Workspace) CommitWork(ctx context.Context, repoDir, message string) err
 		return err
 	}
 	return gitPush(ctx, repoDir)
+}
+
+// checkSensitiveFiles returns an error if any untracked file in repoDir
+// matches a sensitive filename pattern. Tracked files are ignored because
+// they were deliberately committed before this check existed.
+func checkSensitiveFiles(ctx context.Context, repoDir string) error {
+	untracked, err := gitUntrackedFiles(ctx, repoDir)
+	if err != nil {
+		return err
+	}
+	for _, f := range untracked {
+		base := filepath.Base(f)
+		for _, pat := range sensitivePatterns {
+			matched, err := filepath.Match(pat, base)
+			if err != nil {
+				continue // malformed pattern -- skip
+			}
+			if matched {
+				return fmt.Errorf("CommitWork: refusing to stage sensitive file %q (matches pattern %q); add to .gitignore or remove it", f, pat)
+			}
+		}
+	}
+	return nil
 }

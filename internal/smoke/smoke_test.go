@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/agentq/pkg/workers/mock"
@@ -144,8 +145,9 @@ func TestSupervisorEndToEnd(t *testing.T) {
 		t.Fatalf("claim supervisor task: %v", err)
 	}
 
-	sup := supervisor.New(eq, supervisor.WithConfig(func(c *models.AgentConfig) {
-		*c = *models.SupervisorAgent()
+	sup := supervisor.New(eq, supervisor.WithAgents([]config.Agent{
+		{Name: "coder", Description: "writes code to implement features", Queue: "coder_queue"},
+		{Name: "reviewer", Description: "reviews and checks code", Queue: "reviewer_queue"},
 	}))
 	mods, err := sup.ProcessTask(ctx, claimed)
 	if err != nil {

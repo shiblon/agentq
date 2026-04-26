@@ -7,3 +7,8 @@ QUBIT.md
 .gemini
 .claude
 /agentq
+
+# engram database
+.claude/engram.db
+.claude/engram.db-shm
+.claude/engram.db-wal

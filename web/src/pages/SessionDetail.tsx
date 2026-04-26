@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getSessionChain, type Session, type Artifact } from '../api';
+import { getSessionChain, cancelSession, type Session, type Artifact } from '../api';
 import { StatusBadge } from '../components/StatusBadge';
 import { navigate } from '../router';
 import './SessionDetail.css';
@@ -43,10 +43,13 @@ function ArtifactCard({ a }: { a: Artifact }) {
   );
 }
 
+const ACTIVE_STATUSES = new Set(['pending', 'in_progress', 'awaiting_review']);
+
 export function SessionDetail({ id }: Props) {
   const [chain, setChain] = useState<Session[]>([]);
   const [error, setError] = useState('');
   const [focused, setFocused] = useState<string>(id);
+  const [cancelling, setCancelling] = useState(false);
 
   const load = () =>
     getSessionChain(id)
@@ -69,6 +72,22 @@ export function SessionDetail({ id }: Props) {
       <div className="page-header">
         <button className="btn-back" onClick={() => navigate('/sessions')}>&larr; Sessions</button>
         {session && <StatusBadge status={session.status} />}
+        {session && ACTIVE_STATUSES.has(session.status) && (
+          <button
+            className="btn-cancel"
+            disabled={cancelling}
+            onClick={() => {
+              if (!confirm('Cancel this session?')) return;
+              setCancelling(true);
+              cancelSession(session.id)
+                .then(() => load())
+                .catch(e => setError(String(e)))
+                .finally(() => setCancelling(false));
+            }}
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
       </div>
 
       {chain.length > 1 && (

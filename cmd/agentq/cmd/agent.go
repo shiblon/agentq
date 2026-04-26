@@ -37,6 +37,12 @@ var agentRemoveCmd = &cobra.Command{
 	RunE:  runAgentRemove,
 }
 
+var agentUpdateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update an agent persona in the config",
+	RunE:  runAgentUpdate,
+}
+
 var agentRunCmd = &cobra.Command{
 	Use:   "run <name>",
 	Short: "Start the worker for a named agent persona",
@@ -46,7 +52,7 @@ var agentRunCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(agentCmd)
-	agentCmd.AddCommand(agentAddCmd, agentListCmd, agentRemoveCmd, agentRunCmd)
+	agentCmd.AddCommand(agentAddCmd, agentListCmd, agentRemoveCmd, agentUpdateCmd, agentRunCmd)
 
 	agentAddCmd.Flags().String("name", "", "Agent name, short lowercase (required)")
 	agentAddCmd.Flags().String("queue", "", "Queue to claim from, e.g. coder_queue (required)")
@@ -60,6 +66,14 @@ func init() {
 
 	agentRemoveCmd.Flags().String("name", "", "Agent name to remove (required)")
 	agentRemoveCmd.MarkFlagRequired("name")
+
+	agentUpdateCmd.Flags().String("name", "", "Agent name to update (required)")
+	agentUpdateCmd.Flags().String("queue", "", "New queue name")
+	agentUpdateCmd.Flags().String("description", "", "New description")
+	agentUpdateCmd.Flags().String("prompt-file", "", "New prompt file path")
+	agentUpdateCmd.Flags().String("cmd", "", "New shell command")
+	agentUpdateCmd.Flags().String("approval-flag", "", "New approval suffix")
+	agentUpdateCmd.MarkFlagRequired("name")
 }
 
 func runAgentAdd(cmd *cobra.Command, args []string) error {
@@ -113,6 +127,39 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Queue, a.Description, a.Cmd)
 	}
 	return w.Flush()
+}
+
+func runAgentUpdate(cmd *cobra.Command, args []string) error {
+	configFile := viper.GetString("config")
+	name, _ := cmd.Flags().GetString("name")
+
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return err
+	}
+
+	queue, _ := cmd.Flags().GetString("queue")
+	desc, _ := cmd.Flags().GetString("description")
+	promptFile, _ := cmd.Flags().GetString("prompt-file")
+	agentCmd, _ := cmd.Flags().GetString("cmd")
+	approvalFlag, _ := cmd.Flags().GetString("approval-flag")
+
+	if err := cfg.Update(name, config.Agent{
+		Queue:          queue,
+		Description:    desc,
+		PromptFile:     promptFile,
+		Cmd:            agentCmd,
+		ApprovalSuffix: approvalFlag,
+	}); err != nil {
+		return err
+	}
+
+	if err := cfg.Save(configFile); err != nil {
+		return err
+	}
+
+	fmt.Printf("updated agent %q\n", name)
+	return nil
 }
 
 func runAgentRemove(cmd *cobra.Command, args []string) error {
