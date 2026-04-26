@@ -1,14 +1,11 @@
 package cmd
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/shiblon/agentq/pkg/auth"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/agentq/pkg/workflow"
-	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -37,16 +34,15 @@ func init() {
 func runSubmit(cmd *cobra.Command, args []string) error {
 	prompt := viper.GetString("prompt")
 	userID := viper.GetString("user")
-	eqAddr := viper.GetString("eq_addr")
 	continueFrom, _ := cmd.Flags().GetString("continue-from")
 	compact, _ := cmd.Flags().GetBool("compact")
 	repo := viper.GetString("submit_repo")
 
 	ctx := cmd.Context()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

@@ -9,7 +9,6 @@ import (
 	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/workers/exec"
 	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -184,7 +183,6 @@ func runAgentRemove(cmd *cobra.Command, args []string) error {
 func runAgentRun(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	configFile := viper.GetString("config")
-	eqAddr := viper.GetString("eq_addr")
 
 	cfg, err := config.Load(configFile)
 	if err != nil {
@@ -200,9 +198,9 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := cmd.Context()
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

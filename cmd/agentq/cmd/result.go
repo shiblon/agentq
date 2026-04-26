@@ -6,10 +6,7 @@ import (
 
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
-	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var resultCmd = &cobra.Command{
@@ -31,14 +28,13 @@ func init() {
 
 func runResult(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
-	eqAddr := viper.GetString("eq_addr")
 	all, _ := cmd.Flags().GetBool("all")
 
 	ctx := context.Background()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

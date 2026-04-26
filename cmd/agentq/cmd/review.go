@@ -11,9 +11,7 @@ import (
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var reviewCmd = &cobra.Command{
@@ -36,15 +34,14 @@ func init() {
 }
 
 func runReview(cmd *cobra.Command, args []string) error {
-	eqAddr := viper.GetString("eq_addr")
 	once, _ := cmd.Flags().GetBool("once")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
 	ctx := cmd.Context()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 
@@ -154,4 +151,3 @@ func promptReviewer(scanner *bufio.Scanner) (outcome, humanInput string) {
 		return "input_provided", response
 	}
 }
-

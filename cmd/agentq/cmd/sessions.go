@@ -9,10 +9,7 @@ import (
 	"time"
 
 	"github.com/shiblon/agentq/pkg/store"
-	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var sessionsCmd = &cobra.Command{
@@ -35,15 +32,14 @@ func init() {
 }
 
 func runSessionsList(cmd *cobra.Command, args []string) error {
-	eqAddr := viper.GetString("eq_addr")
 	statusFilter, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	ctx := context.Background()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 
@@ -97,4 +93,3 @@ func formatAge(d time.Duration) string {
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }
-

@@ -1,12 +1,10 @@
 package cmd
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/shiblon/agentq/pkg/workers/exec"
 	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -54,13 +52,12 @@ func runExecWorker(cmd *cobra.Command, args []string) error {
 	promptFile := viper.GetString("prompt_file")
 	replyQueue := viper.GetString("reply_queue")
 	approvalFlag := viper.GetString("approval_flag")
-	eqAddr := viper.GetString("eq_addr")
 
 	ctx := cmd.Context()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

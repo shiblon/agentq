@@ -24,9 +24,13 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().String("eq-addr", "localhost:37706", "entroq gRPC server address")
+	rootCmd.PersistentFlags().String("eq-addr", "localhost:37706", "entroq gRPC server address (env: AGENTQ_EQ_ADDR)")
+	rootCmd.PersistentFlags().String("eq-token", "", "Bearer token for entroq queue access (env: AGENTQ_EQ_TOKEN)")
+	rootCmd.PersistentFlags().String("eq-token-file", "", "File containing bearer token for entroq (Vault Agent / secret rotation)")
 	rootCmd.PersistentFlags().String("config", "agents.yaml", "Path to agents config file (env: AGENTQ_CONFIG)")
 	viper.BindPFlag("eq_addr", rootCmd.PersistentFlags().Lookup("eq-addr"))
+	viper.BindPFlag("eq_token", rootCmd.PersistentFlags().Lookup("eq-token"))
+	viper.BindPFlag("eq_token_file", rootCmd.PersistentFlags().Lookup("eq-token-file"))
 	viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 }
 

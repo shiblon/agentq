@@ -30,6 +30,9 @@ services:
       - /data
     ports:
       - "8181:8181"
+    depends_on:
+      zitadel:
+        condition: service_healthy
     volumes:
       - ../entroq/pkg/authz/opadata/conf/core:/policy/core:ro
       - ../entroq/pkg/authz/opadata/conf/providers:/policy/providers:ro
@@ -69,6 +72,7 @@ services:
       - --jwks-url=http://zitadel:8080/oauth/v2/keys
       - --issuer=http://localhost:8080
     environment:
+      AGENTQ_EQ_TOKEN: ${API_EQ_TOKEN:-}
       AGENTQ_PROVENANCE_KEY: ${PROVENANCE_KEY:-}
     ports:
       - "8090:8090"

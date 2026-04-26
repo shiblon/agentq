@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	agentqapi "github.com/shiblon/agentq/pkg/api"
-	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -63,7 +61,6 @@ func init() {
 
 func runAPI(cmd *cobra.Command, args []string) error {
 	addr := viper.GetString("api_addr")
-	eqAddr := viper.GetString("eq_addr")
 	configFile := viper.GetString("config")
 	staticDir := viper.GetString("api_static_dir")
 	jwksURL := viper.GetString("api_jwks_url")
@@ -78,9 +75,9 @@ func runAPI(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

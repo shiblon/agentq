@@ -18,7 +18,6 @@ import (
 	"github.com/shiblon/agentq/pkg/workers/supervisor"
 	"github.com/shiblon/agentq/pkg/workspace"
 	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/spf13/cobra"
@@ -52,8 +51,6 @@ func init() {
 	runCmd.Flags().String("client-secret", "", "OAuth client secret for token exchange (env: AGENTQ_CLIENT_SECRET)")
 	runCmd.Flags().String("client-id-file", "", "File containing OAuth client ID (Vault Agent / secret rotation)")
 	runCmd.Flags().String("client-secret-file", "", "File containing OAuth client secret (Vault Agent / secret rotation)")
-	runCmd.Flags().String("eq-token", "", "Bearer token for entroq queue access (env: AGENTQ_EQ_TOKEN)")
-	runCmd.Flags().String("eq-token-file", "", "File containing bearer token for entroq queue access (Vault Agent / secret rotation)")
 	runCmd.Flags().String("approval-key", "", "Base64 root key for signing/verifying approval tokens (env: AGENTQ_APPROVAL_KEY)")
 	runCmd.Flags().String("approval-key-file", "", "File containing base64 root key for approval tokens (Vault Agent / secret rotation)")
 	runCmd.Flags().String("provenance-key", "", "Base64 root key for verifying session provenance tokens (env: AGENTQ_PROVENANCE_KEY)")
@@ -63,27 +60,12 @@ func init() {
 	viper.BindPFlag("client_secret", runCmd.Flags().Lookup("client-secret"))
 	viper.BindPFlag("client_id_file", runCmd.Flags().Lookup("client-id-file"))
 	viper.BindPFlag("client_secret_file", runCmd.Flags().Lookup("client-secret-file"))
-	viper.BindPFlag("eq_token", runCmd.Flags().Lookup("eq-token"))
-	viper.BindPFlag("eq_token_file", runCmd.Flags().Lookup("eq-token-file"))
 	viper.BindPFlag("approval_key", runCmd.Flags().Lookup("approval-key"))
 	viper.BindPFlag("approval_key_file", runCmd.Flags().Lookup("approval-key-file"))
 	viper.BindPFlag("provenance_key", runCmd.Flags().Lookup("provenance-key"))
 	viper.BindPFlag("provenance_key_file", runCmd.Flags().Lookup("provenance-key-file"))
 }
 
-// eqToken resolves the bearer token for entroq connections.
-// --eq-token-file takes precedence over --eq-token.
-// Returns empty string if neither is set (unauthenticated mode).
-func eqToken() (string, error) {
-	if f := viper.GetString("eq_token_file"); f != "" {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			return "", fmt.Errorf("read eq token file %q: %w", f, err)
-		}
-		return strings.TrimSpace(string(b)), nil
-	}
-	return viper.GetString("eq_token"), nil
-}
 
 // approvalKey resolves the base64 root key for approval token signing/verification.
 // --approval-key-file takes precedence over --approval-key.
@@ -122,23 +104,12 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--agent and --all are mutually exclusive")
 	}
 
-	eqAddr := viper.GetString("eq_addr")
 	configFile := viper.GetString("config")
 	ctx := cmd.Context()
 
-	eqOpts := []eqgrpc.Option{eqgrpc.WithInsecure()}
-	if tok, err := eqToken(); err != nil {
-		return fmt.Errorf("resolve eq token: %w", err)
-	} else if tok != "" {
-		eqOpts = append(eqOpts, eqgrpc.WithBearerToken(tok))
-		log.Printf("entroq: using bearer token for queue access")
-	} else {
-		log.Printf("entroq: no token configured (set --eq-token or --eq-token-file for queue authorization)")
-	}
-
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqOpts...))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 

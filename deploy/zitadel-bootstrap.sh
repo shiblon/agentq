@@ -116,36 +116,51 @@ CLI_CLIENT_ID=$(echo "$CLI_APP_RESP" | jq -r '.clientId')
 echo "    agentq-cli client id: $CLI_CLIENT_ID"
 
 # ---------------------------------------------------------------------------
-# 4. Create a machine user for the supervisor
+# 4. Create machine users (supervisor + API server)
 # ---------------------------------------------------------------------------
+
+create_machine_user() {
+  local username="$1" description="$2"
+  local resp uid
+  resp=$(zapi POST "/management/v1/users/machine" \
+    -d "{\"userName\":\"${username}\",\"name\":\"${username}\",\"description\":\"${description}\",\"accessTokenType\":\"ACCESS_TOKEN_TYPE_JWT\"}" \
+    2>/dev/null) || true
+  uid=$(echo "$resp" | jq -r '.userId // empty')
+  if [ -z "$uid" ]; then
+    uid=$(zapi GET "/management/v1/users/_search" \
+      -d "{\"queries\":[{\"userNameQuery\":{\"userName\":\"${username}\",\"method\":\"TEXT_QUERY_METHOD_EQUALS\"}}]}" \
+      | jq -r '.result[0].id')
+  fi
+  echo "$uid"
+}
 
 echo "==> Creating supervisor machine user..."
-MACHINE_RESP=$(zapi POST "/management/v1/users/machine" -d '{
-  "userName": "agentq-supervisor",
-  "name": "agentq supervisor",
-  "description": "Service account for agentq supervisor token exchange",
-  "accessTokenType": "ACCESS_TOKEN_TYPE_JWT"
-}') 2>/dev/null || true
+SUPERVISOR_USER_ID=$(create_machine_user "agentq-supervisor" "Service account for agentq supervisor token exchange")
+echo "    supervisor user id: $SUPERVISOR_USER_ID"
 
-MACHINE_USER_ID=$(echo "$MACHINE_RESP" | jq -r '.userId // empty')
-if [ -z "$MACHINE_USER_ID" ]; then
-  MACHINE_USER_ID=$(zapi GET "/management/v1/users/_search" \
-    -d '{"queries":[{"userNameQuery":{"userName":"agentq-supervisor","method":"TEXT_QUERY_METHOD_EQUALS"}}]}' \
-    | jq -r '.result[0].id')
-fi
-echo "    machine user id: $MACHINE_USER_ID"
+echo "==> Creating API server machine user..."
+API_USER_ID=$(create_machine_user "agentq-api" "Service account for agentq HTTP API server")
+echo "    api user id: $API_USER_ID"
 
 # ---------------------------------------------------------------------------
-# 5. Create client credentials for the supervisor (client_credentials grant)
+# 5. Create client credentials for each machine user
 # ---------------------------------------------------------------------------
+
+create_api_app() {
+  local appname="$1"
+  zapi POST "/management/v1/projects/${PROJECT_ID}/apps/api" \
+    -d "{\"name\":\"${appname}\",\"authMethodType\":\"API_AUTH_METHOD_TYPE_BASIC\"}"
+}
 
 echo "==> Generating supervisor client credentials..."
-SECRET_RESP=$(zapi POST "/management/v1/projects/${PROJECT_ID}/apps/api" -d '{
-  "name": "agentq-supervisor",
-  "authMethodType": "API_AUTH_METHOD_TYPE_BASIC"
-}')
-SUPERVISOR_CLIENT_ID=$(echo "$SECRET_RESP" | jq -r '.clientId')
-SUPERVISOR_CLIENT_SECRET=$(echo "$SECRET_RESP" | jq -r '.clientSecret')
+SUP_CREDS=$(create_api_app "agentq-supervisor")
+SUPERVISOR_CLIENT_ID=$(echo "$SUP_CREDS" | jq -r '.clientId')
+SUPERVISOR_CLIENT_SECRET=$(echo "$SUP_CREDS" | jq -r '.clientSecret')
+
+echo "==> Generating API server client credentials..."
+API_CREDS=$(create_api_app "agentq-api")
+API_CLIENT_ID=$(echo "$API_CREDS" | jq -r '.clientId')
+API_CLIENT_SECRET=$(echo "$API_CREDS" | jq -r '.clientSecret')
 
 # ---------------------------------------------------------------------------
 # 6. Grant the supervisor the USER_IMPERSONATOR role for token exchange
@@ -154,7 +169,7 @@ SUPERVISOR_CLIENT_SECRET=$(echo "$SECRET_RESP" | jq -r '.clientSecret')
 
 echo "==> Granting token exchange role to supervisor machine user..."
 zapi POST "/admin/v1/members" -d "{
-  \"userId\": \"${MACHINE_USER_ID}\",
+  \"userId\": \"${SUPERVISOR_USER_ID}\",
   \"roles\": [\"ORG_USER_SELF_IMPERSONATION_POLICY_WRITER\"]
 }" >/dev/null 2>&1 || echo "    (role grant may need manual setup -- see docs)"
 
@@ -164,15 +179,24 @@ zapi POST "/admin/v1/members" -d "{
 
 cat <<SUMMARY
 
-==> Bootstrap complete.
+==> Bootstrap complete. Add these to your .env file:
 
-Human CLI login:
-  agentq login --issuer ${ZITADEL_URL} --client-id ${CLI_CLIENT_ID}
+# Human CLI login
+AGENTQ_CLIENT_ID=${CLI_CLIENT_ID}
 
-Supervisor token exchange (add to agentq run or docker-compose.yaml):
-  --token-url    ${ZITADEL_URL}/oauth/v2/token
-  --client-id    ${SUPERVISOR_CLIENT_ID}
-  --client-secret ${SUPERVISOR_CLIENT_SECRET}
+# Supervisor token exchange
+SUPERVISOR_CLIENT_ID=${SUPERVISOR_CLIENT_ID}
+SUPERVISOR_CLIENT_SECRET=${SUPERVISOR_CLIENT_SECRET}
+
+# entroq queue credentials (obtain access tokens for each machine user via client_credentials grant)
+# POST ${ZITADEL_URL}/oauth/v2/token with client_id/client_secret to get a bearer token,
+# then set each *_EQ_TOKEN to that bearer token.
+# The sub claim in each token must match the corresponding entry in config/entroq-policy/data.json.
+#
+# Supervisor sub: ${SUPERVISOR_USER_ID}
+# API server sub: ${API_USER_ID}
+#
+# Replace REPLACE_WITH_*_SUB in config/entroq-policy/data.json with those values.
 
 API server JWT validation:
   --jwks-url  ${ZITADEL_URL}/oauth/v2/keys

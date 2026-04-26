@@ -6,10 +6,7 @@ import (
 	"time"
 
 	"github.com/shiblon/agentq/pkg/store"
-	"github.com/shiblon/entroq"
-	"github.com/shiblon/entroq/pkg/backend/eqgrpc"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var waitCmd = &cobra.Command{
@@ -35,7 +32,6 @@ func init() {
 
 func runWait(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
-	eqAddr := viper.GetString("eq_addr")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	interval, _ := cmd.Flags().GetDuration("interval")
 	quiet, _ := cmd.Flags().GetBool("quiet")
@@ -43,9 +39,9 @@ func runWait(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
 
-	eq, err := entroq.New(ctx, eqgrpc.Opener(eqAddr, eqgrpc.WithInsecure()))
+	eq, err := openEQ(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to eq at %s: %w", eqAddr, err)
+		return err
 	}
 	defer eq.Close()
 
