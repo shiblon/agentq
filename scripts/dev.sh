@@ -66,6 +66,7 @@ echo "Starting API server on $API_ADDR..."
   --addr "$API_ADDR" \
   --eq-addr "$EQ_ADDR" \
   --config "$CONFIG" \
+  --no-auth \
   >"$REPO_ROOT/.api.log" 2>&1 &
 pids+=($!)
 
