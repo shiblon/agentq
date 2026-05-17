@@ -1,5 +1,11 @@
 # Long
 
+## pi-supervisor-reference
+Pi (pi.dev) is a potential starting point for the supervisor harness.
+Look into it before reinventing the supervisor loop from scratch -- may cover
+turn-based orchestration, context management, and agent dispatch patterns.
+Goal: avoid reimplementing bulk of supervisor harness if Pi already handles it.
+
 ## supervisor-mental-model
 ### Core framing
 The supervisor is the 'chat AI with legions beneath it'. It is a long-running conversation

@@ -2,84 +2,208 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sync"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/shiblon/agentq/pkg/models"
 )
 
-// ArtifactSink receives artifacts written by the agent during a task.
-type ArtifactSink func(models.Artifact)
-
-// SessionTools returns the two fundamental tools every agent needs:
-//
-//   - read_session: returns the session as JSON (prompt, artifacts, metadata)
-//   - write_artifact: appends an artifact via sink; agentName is fixed at construction time
-//
-// These tools carry no credentials and impose no side effects beyond the sink.
-func SessionTools(session *models.Session, agentName string, sink ArtifactSink) []Tool {
-	return []Tool{
-		newReadSessionTool(session),
-		newWriteArtifactTool(session, agentName, sink),
+// AllFileTools returns the full set of file tools. Pass this to
+// server.MCPServer.AddTools when constructing the pool server.
+// Each handler enforces the session allowlist at call time via
+// withAllowlistCheck, providing defence-in-depth beyond tools/list filtering.
+func AllFileTools() []server.ServerTool {
+	return []server.ServerTool{
+		readFileTool(),
+		writeFileTool(),
+		listDirectoryTool(),
+		createDirectoryTool(),
 	}
 }
 
-// CollectingSink returns a sink that appends artifacts to a slice and the
-// pointer to that slice. Safe to call from multiple goroutines.
-func CollectingSink() (ArtifactSink, *[]models.Artifact) {
-	var mu sync.Mutex
-	var collected []models.Artifact
-	sink := func(a models.Artifact) {
-		mu.Lock()
-		collected = append(collected, a)
-		mu.Unlock()
-	}
-	return sink, &collected
-}
-
-// newReadSessionTool builds the read_session tool for the given session.
-func newReadSessionTool(session *models.Session) Tool {
-	def := mcp.NewTool("read_session",
-		mcp.WithDescription("Read the current session: the user prompt, prior artifacts, and session metadata. Call this first to understand what you have been asked to do."),
-	)
-	handler := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		b, err := json.Marshal(session)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal session: %v", err)), nil
+// withAllowlistCheck wraps h so that it returns a tool error if the session's
+// ToolAllowlist does not contain name. This is the per-call enforcement layer;
+// tools/list filtering (via WithToolFilter) is the visibility layer.
+func withAllowlistCheck(name string, h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		c := claimsFromContext(ctx)
+		if c == nil {
+			return mcplib.NewToolResultError("no session claims in context"), nil
 		}
-		return mcp.NewToolResultText(string(b)), nil
+		if !slices.Contains(c.ToolAllowlist, name) {
+			return mcplib.NewToolResultError(fmt.Sprintf("tool %q not permitted for this session", name)), nil
+		}
+		return h(ctx, req)
 	}
-	return server.ServerTool{Tool: def, Handler: handler}
 }
 
-// newWriteArtifactTool builds the write_artifact tool for the given session and agent.
-func newWriteArtifactTool(session *models.Session, agentName string, sink ArtifactSink) Tool {
-	def := mcp.NewTool("write_artifact",
-		mcp.WithDescription("Write a result artifact for this session. Call this when you have output to record."),
-		mcp.WithString("type",
-			mcp.Required(),
-			mcp.Description(`Artifact type. Use "result" for primary output, "context_summary" for summaries.`),
+// chrootPath resolves requested (as the agent sees it, rooted at /) into a
+// real filesystem path under workdir. Returns an error if workdir is empty
+// (no filesystem access) or if the resolved path escapes workdir.
+func chrootPath(workdir, requested string) (string, error) {
+	if workdir == "" {
+		return "", fmt.Errorf("no filesystem access configured for this session")
+	}
+	// Treat requested as absolute within the chroot root. filepath.Clean
+	// clamps traversal at the root so ../../etc/passwd → /etc/passwd, which
+	// filepath.Join then maps to workdir/etc/passwd.
+	real := filepath.Join(workdir, filepath.Clean("/"+requested))
+	root := filepath.Clean(workdir)
+	if real != root && !strings.HasPrefix(real, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes working directory")
+	}
+	return real, nil
+}
+
+// -- read_file ----------------------------------------------------------------
+
+func readFileTool() server.ServerTool {
+	def := mcplib.NewTool("read_file",
+		mcplib.WithDescription("Read the contents of a file. Paths are relative to the session root (/)."),
+		mcplib.WithString("path",
+			mcplib.Required(),
+			mcplib.Description("File path, e.g. /src/main.go or src/main.go"),
 		),
-		mcp.WithString("content",
-			mcp.Required(),
-			mcp.Description("Artifact content as markdown text."),
+	)
+	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("read_file", readFileHandler)}
+}
+
+func readFileHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	c := claimsFromContext(ctx)
+	if c == nil {
+		return mcplib.NewToolResultError("no session claims in context"), nil
+	}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	real, err := chrootPath(c.Workdir, path)
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	content, err := os.ReadFile(real)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("read %s: %v", path, err)), nil
+	}
+	return mcplib.NewToolResultText(string(content)), nil
+}
+
+// -- write_file ---------------------------------------------------------------
+
+func writeFileTool() server.ServerTool {
+	def := mcplib.NewTool("write_file",
+		mcplib.WithDescription("Write content to a file, creating parent directories as needed. Overwrites any existing content."),
+		mcplib.WithString("path",
+			mcplib.Required(),
+			mcplib.Description("File path"),
+		),
+		mcplib.WithString("content",
+			mcplib.Required(),
+			mcplib.Description("Content to write"),
 		),
 	)
-	handler := func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		artifactType, err := req.RequireString("type")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		content, err := req.RequireString("content")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		a := models.NewArtifact(session.ID, agentName, artifactType, content)
-		sink(*a)
-		return mcp.NewToolResultText(fmt.Sprintf("artifact %s written", a.ID)), nil
+	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("write_file", writeFileHandler)}
+}
+
+func writeFileHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	c := claimsFromContext(ctx)
+	if c == nil {
+		return mcplib.NewToolResultError("no session claims in context"), nil
 	}
-	return server.ServerTool{Tool: def, Handler: handler}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	content, err := req.RequireString("content")
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	real, err := chrootPath(c.Workdir, path)
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(real), 0755); err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("create parent dirs for %s: %v", path, err)), nil
+	}
+	if err := os.WriteFile(real, []byte(content), 0644); err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("write %s: %v", path, err)), nil
+	}
+	return mcplib.NewToolResultText(fmt.Sprintf("wrote %s", path)), nil
+}
+
+// -- list_directory -----------------------------------------------------------
+
+func listDirectoryTool() server.ServerTool {
+	def := mcplib.NewTool("list_directory",
+		mcplib.WithDescription("List the contents of a directory. Each entry is prefixed with [file] or [dir]."),
+		mcplib.WithString("path",
+			mcplib.Required(),
+			mcplib.Description("Directory path"),
+		),
+	)
+	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("list_directory", listDirectoryHandler)}
+}
+
+func listDirectoryHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	c := claimsFromContext(ctx)
+	if c == nil {
+		return mcplib.NewToolResultError("no session claims in context"), nil
+	}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	real, err := chrootPath(c.Workdir, path)
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("list %s: %v", path, err)), nil
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() {
+			fmt.Fprintf(&b, "[dir]  %s\n", e.Name())
+		} else {
+			fmt.Fprintf(&b, "[file] %s\n", e.Name())
+		}
+	}
+	return mcplib.NewToolResultText(b.String()), nil
+}
+
+// -- create_directory ---------------------------------------------------------
+
+func createDirectoryTool() server.ServerTool {
+	def := mcplib.NewTool("create_directory",
+		mcplib.WithDescription("Create a directory and all necessary parent directories."),
+		mcplib.WithString("path",
+			mcplib.Required(),
+			mcplib.Description("Directory path to create"),
+		),
+	)
+	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("create_directory", createDirectoryHandler)}
+}
+
+func createDirectoryHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	c := claimsFromContext(ctx)
+	if c == nil {
+		return mcplib.NewToolResultError("no session claims in context"), nil
+	}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	real, err := chrootPath(c.Workdir, path)
+	if err != nil {
+		return mcplib.NewToolResultError(err.Error()), nil
+	}
+	if err := os.MkdirAll(real, 0755); err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("mkdir %s: %v", path, err)), nil
+	}
+	return mcplib.NewToolResultText(fmt.Sprintf("created %s", path)), nil
 }
