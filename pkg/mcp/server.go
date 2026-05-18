@@ -23,11 +23,23 @@ type Config struct {
 	Addr string
 
 	// PublicKeys is the JWKS used to verify session tokens.
-	// The caller is responsible for loading the key set (from file or URL).
+	// Required unless InsecureNoAuth is true.
 	PublicKeys jwk.Set
 
 	// Issuer is the expected iss claim in session tokens.
+	// Required unless InsecureNoAuth is true.
 	Issuer string
+
+	// InsecureSkipVerification disables JWT signature verification. The token
+	// is still parsed and its Claims are used -- workdir and tool allowlist
+	// remain dynamic per-session. Only the cryptographic proof of origin is
+	// skipped. Never use in production.
+	InsecureSkipVerification bool
+
+	// DevTools enables development-only tools (e.g. echo). These tools must
+	// never be available in production. Controlled independently of
+	// InsecureSkipVerification -- both can be set independently.
+	DevTools bool
 }
 
 type claimsContextKey struct{}
@@ -51,6 +63,10 @@ type Server struct {
 
 // New constructs a Server from cfg. Call Start to begin accepting connections.
 func New(cfg Config) (*Server, error) {
+	if !cfg.InsecureSkipVerification && cfg.PublicKeys == nil {
+		return nil, fmt.Errorf("mcp: PublicKeys required (or set InsecureSkipVerification for dev)")
+	}
+
 	s := &Server{
 		claims: make(map[string]*Claims),
 	}
@@ -68,7 +84,11 @@ func New(cfg Config) (*Server, error) {
 		server.WithToolFilter(s.allowlistFilter),
 		server.WithHooks(hooks),
 	)
-	mcpSrv.AddTools(AllFileTools()...)
+	tools := AllTools()
+	if cfg.DevTools {
+		tools = append(tools, AllDevTools()...)
+	}
+	mcpSrv.AddTools(tools...)
 
 	// sessionIDGen runs during handleSSE (at /sse connection time), after
 	// jwtMiddleware has already validated the token and stored Claims in
@@ -107,9 +127,10 @@ func New(cfg Config) (*Server, error) {
 		contextFunc,
 	)
 	s.sse = sseSrv
+
 	s.http = &http.Server{
 		Addr:    cfg.Addr,
-		Handler: jwtMiddleware(cfg.PublicKeys, cfg.Issuer, sseSrv),
+		Handler: jwtMiddleware(cfg.PublicKeys, cfg.Issuer, cfg.InsecureSkipVerification, sseSrv),
 	}
 
 	return s, nil
@@ -146,10 +167,11 @@ func (s *Server) Close(ctx context.Context) error {
 }
 
 // jwtMiddleware validates ?token= on /sse requests and rejects with 401 on
-// failure. Requests to other paths (e.g. /message) pass through without
-// re-checking; their session Claims were validated at connection time and are
-// stored in the Server's claims map.
-func jwtMiddleware(pubKeys jwk.Set, issuer string, next http.Handler) http.Handler {
+// failure. When skipVerification is true the JWT signature is not checked --
+// Claims are still parsed from the token payload and remain dynamic per-session.
+// Requests to other paths (e.g. /message) pass through; their Claims were
+// recorded at connection time in the Server's claims map.
+func jwtMiddleware(pubKeys jwk.Set, issuer string, skipVerification bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/sse" {
 			raw := r.URL.Query().Get("token")
@@ -157,7 +179,15 @@ func jwtMiddleware(pubKeys jwk.Set, issuer string, next http.Handler) http.Handl
 				http.Error(w, "missing token", http.StatusUnauthorized)
 				return
 			}
-			c, err := Parse(pubKeys, issuer, raw)
+			var (
+				c   *Claims
+				err error
+			)
+			if skipVerification {
+				c, err = ParseInsecure(raw)
+			} else {
+				c, err = Parse(pubKeys, issuer, raw)
+			}
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return

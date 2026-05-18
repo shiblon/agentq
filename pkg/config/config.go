@@ -13,16 +13,32 @@ const (
 	EnvWorkspaceSelf = "AGENTQ_SELF"
 )
 
+// WildcardTools is the sentinel value meaning "all available tools".
+// Use in Agent.Tools to explicitly grant the full tool set.
+// Empty Tools is fail-closed (no tools permitted).
+const WildcardTools = "*"
+
 // Agent defines a specialist agent persona.
 type Agent struct {
-	Name           string `yaml:"name"            json:"name"`
-	Queue          string `yaml:"queue"           json:"queue"`
-	Description    string `yaml:"description"     json:"description"`
-	PromptFile     string `yaml:"prompt_file,omitempty"    json:"prompt_file,omitempty"`
+	Name        string `yaml:"name"        json:"name"`
+	Queue       string `yaml:"queue"       json:"queue"`
+	Description string `yaml:"description" json:"description"`
+	PromptFile  string `yaml:"prompt_file,omitempty" json:"prompt_file,omitempty"`
+
+	// Cmd and ApprovalSuffix are used by the legacy exec worker.
 	Cmd            string `yaml:"cmd,omitempty"            json:"cmd,omitempty"`
-	// ApprovalSuffix is appended to Cmd when the task carries approved_actions.
-	// For "claude --print" workers, set this to "--dangerously-skip-permissions".
 	ApprovalSuffix string `yaml:"approval_suffix,omitempty" json:"approval_suffix,omitempty"`
+
+	// RunnerURL is the base URL of the runner microservice for this agent type.
+	RunnerURL string `yaml:"runner_url,omitempty" json:"runner_url,omitempty"`
+
+	// MCPAddr is the base URL of the MCP pool server this agent connects to.
+	MCPAddr string `yaml:"mcp_addr,omitempty" json:"mcp_addr,omitempty"`
+
+	// Tools is the ceiling of MCP tools this agent type may use.
+	// Use ["*"] to permit all available tools.
+	// An empty list (or absent field) means no tools are permitted (fail-closed).
+	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
 }
 
 // WorkspaceConfig describes the shared file workspace for agent workers.

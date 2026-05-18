@@ -1,5 +1,67 @@
 # Long
 
+## runner-cmd-policy
+## Runner command policy: baked in, not in payload
+
+The runner's command is fixed at deploy time (env var, startup flag, or compiled default).
+It is NOT part of the task payload.
+
+A runner image = one agent type. To run a different agent, deploy a different runner.
+
+Rationale:
+- Container image is the capability enforcement boundary (what's installed = what can run)
+- Payload is data only; it cannot direct what binary to execute
+- A compromised task can only feed bad input to the fixed command -- it cannot pivot
+- No accidental arbitrary execution from a badly configured container
+
+This deliberately abandons the generality of the old exec worker (cmd in config/payload).
+The runner is a microservice, not a general-purpose subprocess launcher.
+
+## runner-auth-model
+## Runner auth model: two phases
+
+### Short-term (prosumer / single-machine)
+Runner is a binary executor. Auth is a deployment concern, not a runner concern.
+- Mount claude auth files into the runner container (e.g. ~/.claude/)
+- Runner execs: claude --print --mcp-config <file>
+- claude CLI finds credentials and handles auth transparently
+- For API key users: ANTHROPIC_API_KEY in env, same runner binary
+
+Runner never touches credentials. What's mounted/set determines the auth model.
+
+### Medium-term (API / multi-machine)
+For shared environments or multi-machine setups where mounting user credentials
+is impractical:
+- Scoped token passed to runner in task payload (agent_token)
+- Runner sets ANTHROPIC_API_KEY or AGENTQ_TOKEN in subprocess env
+- Follows the existing agent_token / AGENTQ_TOKEN pattern from exec worker
+
+### Design principle
+The runner binary is identical in both cases. Credential mode is deployment
+config, not application code.
+
+## agentq-runner-http-model
+## AgentQ + Runner: plain HTTP, eqlink is optional infrastructure
+
+AgentQ and Runner communicate via direct HTTP. Neither is queue-aware on the
+dispatch side -- AgentQ POSTs to a URL, Runner serves HTTP. That's the contract.
+
+eqlink is a sidecar that can be dropped in front of both:
+- AgentQ outbound sidecar: intercepts the HTTP POST, enqueues it
+- Runner inbound sidecar: watches the queue, calls the Runner's HTTP endpoint
+
+The application code is identical with or without eqlink. This means:
+
+**For testing:** wire AgentQ → Runner directly, no EntroQ needed.
+**For production:** add eqlink sidecars, get queue-backed flow control and scaling
+  for free -- no code changes.
+**For scaling policy:** token-budget throttling, connection-count HPA, etc. are
+  all expressed at the eqlink/queue layer, not in application code.
+
+JWT flow: Supervisor mints JWT → includes in task payload → AgentQ claims task
+→ forwards JWT in HTTP POST to Runner → Runner puts ?token=<jwt> in MCP SSE URL.
+AgentQ never mints; it just forwards what it received.
+
 ## pi-supervisor-reference
 Pi (pi.dev) is a potential starting point for the supervisor harness.
 Look into it before reinventing the supervisor loop from scratch -- may cover

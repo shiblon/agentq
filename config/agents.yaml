@@ -35,26 +35,43 @@ rubric: |
 
 agents:
   # coder: primary implementation agent.
-  # Runs Claude Code in headless mode; reads its prompt from config/prompts/coder.txt.
+  # Full tool access: reads, writes, and navigates the codebase.
   - name: coder
-    queue: coder_queue
+    queue: agentq/coder/inbox
     description: Writes, reads, and edits source code to implement a task.
     prompt_file: config/prompts/coder.txt
-    cmd: claude --print
-    # approval_suffix is appended to cmd when the supervisor grants elevated
-    # permissions (approved_actions in the task payload).
-    approval_suffix: --dangerously-skip-permissions
+    runner_url: http://localhost:8082
+    mcp_addr: http://localhost:8081
+    tools:
+      - "*"   # all available tools; use allowed_tools/blocked_tools in tasks to restrict
 
-  # reviewer: checks the coder's output for correctness and style.
+  # reviewer: read-only access; never writes files.
   - name: reviewer
-    queue: reviewer_queue
+    queue: agentq/reviewer/inbox
     description: Reviews code written by the coder for correctness, style, and tests.
     prompt_file: config/prompts/reviewer.txt
-    cmd: claude --print
+    runner_url: http://localhost:8082
+    mcp_addr: http://localhost:8081
+    tools:
+      - read_file
+      - list_directory
 
-  # researcher: looks things up without touching the codebase.
+  # researcher: read-only access; looks things up without touching the codebase.
   - name: researcher
-    queue: researcher_queue
+    queue: agentq/researcher/inbox
     description: Researches questions using web search and documentation lookup.
     prompt_file: config/prompts/researcher.txt
+    runner_url: http://localhost:8082
+    mcp_addr: http://localhost:8081
+    tools:
+      - read_file
+      - list_directory
+
+  # Legacy exec-worker entries kept for backward compatibility.
+  # Remove once all workers have migrated to the AgentQ/runner model.
+  - name: coder-legacy
+    queue: coder_queue
+    description: Legacy exec-worker coder (subprocess model).
+    prompt_file: config/prompts/coder.txt
     cmd: claude --print
+    approval_suffix: --dangerously-skip-permissions

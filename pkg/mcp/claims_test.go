@@ -3,12 +3,18 @@ package mcp
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"testing"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
+
+// base64RawURL encodes b as base64url with no padding, matching the JWT payload encoding.
+func base64RawURL(b []byte) string {
+	return base64.RawURLEncoding.EncodeToString(b)
+}
 
 // testKeyPair generates an RSA key pair and returns the private jwk.Key and a
 // jwk.Set containing only the public key, mirroring the real issuer/verifier split.
@@ -153,6 +159,124 @@ func TestMintParse_DefaultExpiry(t *testing.T) {
 	maxExpiry := after.Truncate(time.Second).Add(defaultTokenTTL)
 	if got.Expiry.Before(minExpiry) || got.Expiry.After(maxExpiry) {
 		t.Errorf("Expiry = %v, want between %v and %v", got.Expiry, minExpiry, maxExpiry)
+	}
+}
+
+// -- ParseInsecure tests ------------------------------------------------------
+
+func TestParseInsecure_RoundTrip(t *testing.T) {
+	priv, _ := testKeyPair(t)
+	want := Claims{
+		Issuer:        "agentq",
+		SessionID:     "sess-insecure",
+		Workdir:       "/var/work",
+		ToolAllowlist: []string{"read_file", "list_directory"},
+	}
+	raw, err := Mint(priv, want)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	got, err := ParseInsecure(raw)
+	if err != nil {
+		t.Fatalf("ParseInsecure: %v", err)
+	}
+	if got.SessionID != want.SessionID {
+		t.Errorf("SessionID = %q, want %q", got.SessionID, want.SessionID)
+	}
+	if got.Workdir != want.Workdir {
+		t.Errorf("Workdir = %q, want %q", got.Workdir, want.Workdir)
+	}
+	if len(got.ToolAllowlist) != len(want.ToolAllowlist) {
+		t.Fatalf("ToolAllowlist len = %d, want %d", len(got.ToolAllowlist), len(want.ToolAllowlist))
+	}
+}
+
+func TestParseInsecure_AcceptsWrongKey(t *testing.T) {
+	// Signed with one key -- ParseInsecure must succeed even though we hold a
+	// different key (the whole point of the insecure mode).
+	priv, _ := testKeyPair(t)
+	raw, err := Mint(priv, Claims{
+		Issuer:        "agentq",
+		SessionID:     "sess-1",
+		Workdir:       "/work",
+		ToolAllowlist: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	// Parse with a completely different key set -- must still succeed.
+	_, otherPubSet := testKeyPair(t)
+	if _, err := Parse(otherPubSet, "agentq", raw); err == nil {
+		t.Error("Parse should fail with wrong key (sanity check)")
+	}
+	if _, err := ParseInsecure(raw); err != nil {
+		t.Errorf("ParseInsecure should succeed regardless of key: %v", err)
+	}
+}
+
+func TestParseInsecure_AcceptsExpired(t *testing.T) {
+	priv, _ := testKeyPair(t)
+	raw, err := Mint(priv, Claims{
+		Issuer:        "agentq",
+		SessionID:     "sess-1",
+		Workdir:       "/work",
+		ToolAllowlist: []string{},
+		Expiry:        time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	// ParseInsecure doesn't check expiry.
+	if _, err := ParseInsecure(raw); err != nil {
+		t.Errorf("ParseInsecure should accept expired token: %v", err)
+	}
+}
+
+func TestParseInsecure_MalformedJWT(t *testing.T) {
+	cases := []string{
+		"",
+		"notajwt",
+		"only.two",
+		"has.four.parts.here",
+	}
+	for _, raw := range cases {
+		if _, err := ParseInsecure(raw); err == nil {
+			t.Errorf("ParseInsecure(%q): expected error for malformed jwt", raw)
+		}
+	}
+}
+
+func TestParseInsecure_MissingClaims(t *testing.T) {
+	// Hand-craft JWTs with a missing required claim. ParseInsecure does not
+	// verify the signature so a fake sig is fine here.
+	header := "eyJhbGciOiJSUzI1NiJ9" // {"alg":"RS256"}
+
+	cases := []struct {
+		name    string
+		payload string // JSON, base64url-encoded below
+	}{
+		{
+			"missing mcp_session",
+			`{"iss":"agentq","mcp_workdir":"/w","mcp_tools":[]}`,
+		},
+		{
+			"missing mcp_workdir",
+			`{"iss":"agentq","mcp_session":"s1","mcp_tools":[]}`,
+		},
+		{
+			"missing mcp_tools",
+			`{"iss":"agentq","mcp_session":"s1","mcp_workdir":"/w"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc := base64RawURL([]byte(tc.payload))
+			raw := header + "." + enc + ".fakesig"
+			if _, err := ParseInsecure(raw); err == nil {
+				t.Errorf("expected error for %s", tc.name)
+			}
+		})
 	}
 }
 

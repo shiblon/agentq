@@ -36,27 +36,41 @@ func init() {
 	mcpCmd.AddCommand(mcpServeCmd)
 
 	mcpServeCmd.Flags().String("addr", ":8081", "TCP listen address")
-	mcpServeCmd.Flags().String("jwks-file", "", "Path to JWKS JSON file containing token verification keys (required)")
+	mcpServeCmd.Flags().String("jwks-file", "", "Path to JWKS JSON file containing token verification keys")
 	mcpServeCmd.Flags().String("issuer", "agentq", "Expected iss claim in session tokens")
-
-	_ = mcpServeCmd.MarkFlagRequired("jwks-file")
+	mcpServeCmd.Flags().Bool("insecure-skip-verification", false, "Skip JWT signature verification. Claims are still parsed and dynamic per-session. Never use in production.")
+	mcpServeCmd.Flags().Bool("dev-tools", false, "Enable development-only tools (e.g. echo). Never use in production.")
 }
 
 func runMCPServe(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
-	jwksFile, _ := cmd.Flags().GetString("jwks-file")
-	issuer, _ := cmd.Flags().GetString("issuer")
+	cfg := mcp.Config{Addr: addr}
 
-	pubKeys, err := loadJWKSFile(jwksFile)
-	if err != nil {
-		return fmt.Errorf("load jwks: %w", err)
+	skipVerification, _ := cmd.Flags().GetBool("insecure-skip-verification")
+	devTools, _ := cmd.Flags().GetBool("dev-tools")
+	if devTools {
+		cfg.DevTools = true
+		fmt.Fprintln(os.Stderr, "WARNING: --dev-tools is set; development-only tools are enabled. Do not use in production.")
 	}
 
-	srv, err := mcp.New(mcp.Config{
-		Addr:       addr,
-		PublicKeys: pubKeys,
-		Issuer:     issuer,
-	})
+	if skipVerification {
+		cfg.InsecureSkipVerification = true
+		fmt.Fprintln(os.Stderr, "WARNING: --insecure-skip-verification is set; JWT signatures are not checked. Do not use in production.")
+	} else {
+		jwksFile, _ := cmd.Flags().GetString("jwks-file")
+		if jwksFile == "" {
+			return fmt.Errorf("--jwks-file is required (or use --insecure-skip-verification for dev)")
+		}
+		issuer, _ := cmd.Flags().GetString("issuer")
+		pubKeys, err := loadJWKSFile(jwksFile)
+		if err != nil {
+			return fmt.Errorf("load jwks: %w", err)
+		}
+		cfg.PublicKeys = pubKeys
+		cfg.Issuer = issuer
+	}
+
+	srv, err := mcp.New(cfg)
 	if err != nil {
 		return fmt.Errorf("create mcp server: %w", err)
 	}

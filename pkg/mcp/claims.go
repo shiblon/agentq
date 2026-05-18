@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	claimSession = "mcp_session"
-	claimWorkdir = "mcp_workdir"
-	claimTools   = "mcp_tools"
+	claimSession  = "mcp_session"
+	claimWorkdir  = "mcp_workdir"
+	claimTools    = "mcp_tools"
+	claimBranches = "mcp_branches"
 
 	defaultTokenTTL = time.Hour
 )
@@ -39,6 +40,13 @@ type Claims struct {
 	// hidden from tools/list and rejected at call time.
 	ToolAllowlist []string
 
+	// AllowedBranches constrains which git branches may be pushed to or pulled
+	// from. Patterns are matched as globs (e.g. "feature/*", "develop").
+	// Empty means no git push/pull is permitted even if those tools are listed.
+	// TODO: this is the first per-tool config field; generalise to
+	// ToolConfig map[string]any when a second tool needs its own config.
+	AllowedBranches []string
+
 	// Expiry is when this token becomes invalid.
 	// If zero when passed to Mint, a default TTL of one hour is used.
 	Expiry time.Time
@@ -58,6 +66,7 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		Claim(claimSession, c.SessionID).
 		Claim(claimWorkdir, c.Workdir).
 		Claim(claimTools, c.ToolAllowlist).
+		Claim(claimBranches, c.AllowedBranches).
 		Build()
 	if err != nil {
 		return "", fmt.Errorf("mcp: build token: %w", err)
@@ -69,6 +78,19 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 	}
 
 	return string(signed), nil
+}
+
+// ParseInsecure decodes the Claims from raw without verifying the JWT signature
+// or checking expiry. For development and testing only -- never use in production.
+// The JWT still must be structurally valid and contain the expected claims.
+// Uses jwt.ParseInsecure from lestrrat-go/jwx, which skips both verification
+// and validation, then extracts claims via the same path as Parse.
+func ParseInsecure(raw string) (*Claims, error) {
+	tok, err := jwt.ParseInsecure([]byte(raw))
+	if err != nil {
+		return nil, fmt.Errorf("mcp: parse insecure token: %w", err)
+	}
+	return extractClaims(tok)
 }
 
 // Parse validates raw against keySet, checks that iss matches issuer and the
@@ -83,30 +105,49 @@ func Parse(keySet jwk.Set, issuer, raw string) (*Claims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mcp: parse token: %w", err)
 	}
+	return extractClaims(tok)
+}
 
+// extractClaims pulls the agentq-specific private claims from a parsed JWT token.
+// Called by both Parse and ParseInsecure after their respective validation steps.
+func extractClaims(tok jwt.Token) (*Claims, error) {
 	private := tok.PrivateClaims()
 
 	sessionID, err := requireString(private, claimSession)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: parse token: %w", err)
+		return nil, fmt.Errorf("mcp: extract claims: %w", err)
 	}
 
 	workdir, err := requireString(private, claimWorkdir)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: parse token: %w", err)
+		return nil, fmt.Errorf("mcp: extract claims: %w", err)
 	}
 
 	tools, err := requireStringSlice(private, claimTools)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: parse token: %w", err)
+		return nil, fmt.Errorf("mcp: extract claims: %w", err)
+	}
+
+	// AllowedBranches is optional -- absent or empty means no git push/pull.
+	var branches []string
+	if v, ok := private[claimBranches]; ok {
+		if arr, ok := v.([]any); ok {
+			branches = make([]string, 0, len(arr))
+			for _, elem := range arr {
+				if s, ok := elem.(string); ok {
+					branches = append(branches, s)
+				}
+			}
+		}
 	}
 
 	return &Claims{
-		Issuer:        tok.Issuer(),
-		SessionID:     sessionID,
-		Workdir:       workdir,
-		ToolAllowlist: tools,
-		Expiry:        tok.Expiration(),
+		Issuer:          tok.Issuer(),
+		SessionID:       sessionID,
+		Workdir:         workdir,
+		ToolAllowlist:   tools,
+		AllowedBranches: branches,
+		Expiry:          tok.Expiration(),
 	}, nil
 }
 
