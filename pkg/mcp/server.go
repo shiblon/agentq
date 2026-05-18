@@ -1,7 +1,7 @@
 // Package mcp provides a long-running MCP pool server for AgentQ.
-// Each SSE connection is an independent session configured by a signed JWT
-// passed as the ?token= query parameter. The JWT carries the tool allowlist
-// and filesystem context for that session; no separate admin call is needed.
+// Each request carries a signed JWT in the X-AgentQ-Session-Config header.
+// The JWT carries the tool allowlist and filesystem context for that session;
+// no separate admin call or persistent connection is needed.
 package mcp
 
 import (
@@ -11,28 +11,31 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/google/uuid"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
 
+// SessionConfigHeader is the HTTP header carrying the MCP session JWT.
+// It is named to make clear this is configuration, not authentication.
+const SessionConfigHeader = "X-AgentQ-Session-Config"
+
 // Config holds the configuration for the MCP pool server.
 type Config struct {
-	// Addr is the TCP listen address, e.g. ":8080".
+	// Addr is the TCP listen address, e.g. ":8081".
 	Addr string
 
 	// PublicKeys is the JWKS used to verify session tokens.
-	// Required unless InsecureNoAuth is true.
+	// Required unless InsecureSkipVerification is true.
 	PublicKeys jwk.Set
 
 	// Issuer is the expected iss claim in session tokens.
-	// Required unless InsecureNoAuth is true.
+	// Required unless InsecureSkipVerification is true.
 	Issuer string
 
 	// InsecureSkipVerification disables JWT signature verification. The token
 	// is still parsed and its Claims are used -- workdir and tool allowlist
-	// remain dynamic per-session. Only the cryptographic proof of origin is
+	// remain dynamic per-request. Only the cryptographic proof of origin is
 	// skipped. Never use in production.
 	InsecureSkipVerification bool
 
@@ -44,21 +47,18 @@ type Config struct {
 
 type claimsContextKey struct{}
 
-// claimsFromContext returns the Claims stored in ctx by the JWT middleware,
-// or nil if the context carries no claims.
+// claimsFromContext returns the Claims stored in ctx, or nil if absent.
 func claimsFromContext(ctx context.Context) *Claims {
 	c, _ := ctx.Value(claimsContextKey{}).(*Claims)
 	return c
 }
 
-// Server is a long-running MCP pool server. Each SSE connection is an
-// independent session isolated by the Claims in its session JWT.
+// Server is a long-running MCP pool server using the Streamable HTTP transport.
+// Session configuration is carried in every request via X-AgentQ-Session-Config;
+// the server is stateless -- no session store is maintained.
 type Server struct {
-	sse  *server.SSEServer
-	http *http.Server
-
-	mu     sync.RWMutex
-	claims map[string]*Claims // mcp session ID → Claims
+	streamable *server.StreamableHTTPServer
+	http       *http.Server
 
 	keysMu  sync.RWMutex
 	pubKeys jwk.Set // guarded by keysMu; use getPublicKeys / ReloadPublicKeys
@@ -88,23 +88,14 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		claims:  make(map[string]*Claims),
 		pubKeys: cfg.PublicKeys,
 		issuer:  cfg.Issuer,
 	}
-
-	hooks := &server.Hooks{}
-	hooks.AddOnUnregisterSession(func(_ context.Context, session server.ClientSession) {
-		s.mu.Lock()
-		delete(s.claims, session.SessionID())
-		s.mu.Unlock()
-	})
 
 	mcpSrv := server.NewMCPServer(
 		"agentq-mcp", "1.0.0",
 		server.WithToolCapabilities(true),
 		server.WithToolFilter(s.allowlistFilter),
-		server.WithHooks(hooks),
 	)
 	tools := AllTools()
 	if cfg.DevTools {
@@ -112,54 +103,31 @@ func New(cfg Config) (*Server, error) {
 	}
 	mcpSrv.AddTools(tools...)
 
-	// sessionIDGen runs during handleSSE (at /sse connection time), after
-	// jwtMiddleware has already validated the token and stored Claims in
-	// r.Context(). We record Claims keyed by the new session ID so they
-	// survive into later message requests.
-	sessionIDGen := func(_ context.Context, r *http.Request) (string, error) {
+	// HTTPContextFunc fires on every request. The outer jwtMiddlewareHandler
+	// has already validated the token and stored Claims in r.Context(); here
+	// we propagate them into mcp-go's context for the tool filter and handlers.
+	contextFunc := server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 		c, ok := r.Context().Value(claimsContextKey{}).(*Claims)
 		if !ok || c == nil {
-			return "", fmt.Errorf("mcp: session claims missing from context")
-		}
-		sid := uuid.NewString()
-		s.mu.Lock()
-		s.claims[sid] = c
-		s.mu.Unlock()
-		return sid, nil
-	}
-
-	// contextFunc runs during handleMessage (each /message POST).
-	// It retrieves Claims from the store by ?sessionId= and adds them to the
-	// mcp-go context so the tool filter and handlers can read them.
-	contextFunc := server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
-		sid := r.URL.Query().Get("sessionId")
-		s.mu.RLock()
-		c := s.claims[sid]
-		s.mu.RUnlock()
-		if c == nil {
 			return ctx
 		}
 		return context.WithValue(ctx, claimsContextKey{}, c)
 	})
 
-	sseSrv := server.NewSSEServer(mcpSrv,
-		server.WithBaseURL("http://"+cfg.Addr),
-		server.WithUseFullURLForMessageEndpoint(false),
-		server.WithSessionIDGenerator(sessionIDGen),
+	s.streamable = server.NewStreamableHTTPServer(mcpSrv,
+		server.WithStateLess(true),
 		contextFunc,
 	)
-	s.sse = sseSrv
 
 	s.http = &http.Server{
 		Addr:    cfg.Addr,
-		Handler: s.jwtMiddlewareHandler(cfg.InsecureSkipVerification, sseSrv),
+		Handler: s.jwtMiddlewareHandler(cfg.InsecureSkipVerification, s.streamable),
 	}
 
 	return s, nil
 }
 
-// Handler returns the HTTP handler for the server. Useful in tests where
-// the caller wants to wrap the handler with httptest.NewServer.
+// Handler returns the HTTP handler. Useful in tests with httptest.NewServer.
 func (s *Server) Handler() http.Handler { return s.http.Handler }
 
 // Start begins accepting connections. It blocks until ctx is cancelled or a
@@ -184,38 +152,34 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Close shuts the server down gracefully.
 func (s *Server) Close(ctx context.Context) error {
-	s.sse.CloseSessions()
-	return s.http.Shutdown(ctx)
+	return s.streamable.Shutdown(ctx)
 }
 
-// jwtMiddlewareHandler returns an HTTP handler that validates ?token= on /sse
-// requests. When skipVerification is true the JWT signature is not checked --
-// Claims are still parsed from the token payload and remain dynamic per-session.
-// Reads public keys from s.getPublicKeys() so ReloadPublicKeys takes effect
-// on the next connection without a restart.
+// jwtMiddlewareHandler validates the X-AgentQ-Session-Config header on every
+// request. When skipVerification is true the JWT signature is not checked --
+// Claims are still parsed and remain dynamic per-request. Reads public keys
+// from s.getPublicKeys() so ReloadPublicKeys takes effect without a restart.
 func (s *Server) jwtMiddlewareHandler(skipVerification bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/sse" {
-			raw := r.URL.Query().Get("token")
-			if raw == "" {
-				http.Error(w, "missing token", http.StatusUnauthorized)
-				return
-			}
-			var (
-				c   *Claims
-				err error
-			)
-			if skipVerification {
-				c, err = ParseInsecure(raw)
-			} else {
-				c, err = Parse(s.getPublicKeys(), s.issuer, raw)
-			}
-			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
-				return
-			}
-			r = r.WithContext(context.WithValue(r.Context(), claimsContextKey{}, c))
+		raw := r.Header.Get(SessionConfigHeader)
+		if raw == "" {
+			http.Error(w, "missing "+SessionConfigHeader, http.StatusUnauthorized)
+			return
 		}
+		var (
+			c   *Claims
+			err error
+		)
+		if skipVerification {
+			c, err = ParseInsecure(raw)
+		} else {
+			c, err = Parse(s.getPublicKeys(), s.issuer, raw)
+		}
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), claimsContextKey{}, c))
 		next.ServeHTTP(w, r)
 	})
 }

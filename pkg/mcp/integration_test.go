@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -57,9 +58,13 @@ func newTestSession(t *testing.T, allowlist []string) *testSession {
 	}
 
 	ctx := context.Background()
-	c, err := mcpclient.NewSSEMCPClient(ts.URL + "/sse?token=" + tok)
+	c, err := mcpclient.NewStreamableHttpClient(ts.URL+"/mcp",
+		transport.WithHTTPHeaders(map[string]string{
+			SessionConfigHeader: tok,
+		}),
+	)
 	if err != nil {
-		t.Fatalf("NewSSEMCPClient: %v", err)
+		t.Fatalf("NewStreamableHttpClient: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
 

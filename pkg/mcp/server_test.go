@@ -40,7 +40,8 @@ func TestJWTMiddleware_ValidToken_PassesThrough(t *testing.T) {
 	capture := &handlerCapture{}
 	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
-	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set(SessionConfigHeader, tok)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -63,7 +64,7 @@ func TestJWTMiddleware_MissingToken_Returns401(t *testing.T) {
 	capture := &handlerCapture{}
 	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
-	r := httptest.NewRequest(http.MethodGet, "/sse", nil)
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil) // no header
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -92,7 +93,8 @@ func TestJWTMiddleware_ExpiredToken_Returns401(t *testing.T) {
 	capture := &handlerCapture{}
 	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
-	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set(SessionConfigHeader, tok)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -120,7 +122,8 @@ func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 	capture := &handlerCapture{}
 	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
-	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set(SessionConfigHeader, tok)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -129,21 +132,20 @@ func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_NonSSEPath_PassesWithoutToken(t *testing.T) {
+func TestJWTMiddleware_AllPaths_RequireToken(t *testing.T) {
+	// Streamable HTTP: every path requires the session config header,
+	// not just a specific /sse endpoint.
 	_, pubSet := testKeyPair(t)
 	capture := &handlerCapture{}
 	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
-	// /message requests carry ?sessionId=, not ?token=; they should pass through.
-	r := httptest.NewRequest(http.MethodPost, "/message?sessionId=abc", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	if !capture.called {
-		t.Error("next handler should be called for non-SSE path")
+	for _, path := range []string{"/mcp", "/health", "/anything"} {
+		r := httptest.NewRequest(http.MethodPost, path, nil) // no header
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("path %s: status = %d, want 401", path, w.Code)
+		}
 	}
 }
 

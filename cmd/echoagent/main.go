@@ -19,6 +19,7 @@ import (
 	"os"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -42,12 +43,13 @@ type mcpConfigFile struct {
 }
 
 type mcpServerEntry struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func run(configPath string) error {
-	sseURL, err := readSSEURL(configPath)
+	entry, err := readMCPEntry(configPath)
 	if err != nil {
 		return err
 	}
@@ -57,7 +59,7 @@ func run(configPath string) error {
 		userMsg = "(no user message received)"
 	}
 
-	output, err := callEcho(sseURL, userMsg)
+	output, err := callEcho(entry.URL, entry.Headers, userMsg)
 	if err != nil {
 		return err
 	}
@@ -65,24 +67,25 @@ func run(configPath string) error {
 	return writeResult(os.Stdout, output, nil)
 }
 
-func readSSEURL(configPath string) (string, error) {
+func readMCPEntry(configPath string) (*mcpServerEntry, error) {
 	if configPath == "" {
-		return "", fmt.Errorf("--mcp-config is required")
+		return nil, fmt.Errorf("--mcp-config is required")
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return "", fmt.Errorf("read mcp-config: %w", err)
+		return nil, fmt.Errorf("read mcp-config: %w", err)
 	}
 	var cfg mcpConfigFile
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", fmt.Errorf("parse mcp-config: %w", err)
+		return nil, fmt.Errorf("parse mcp-config: %w", err)
 	}
 	for _, entry := range cfg.MCPServers {
 		if entry.URL != "" {
-			return entry.URL, nil
+			e := entry // capture
+			return &e, nil
 		}
 	}
-	return "", fmt.Errorf("no MCP server URL found in config")
+	return nil, fmt.Errorf("no MCP server URL found in config")
 }
 
 // readLastUserMessage parses stream-json lines from r and returns the content
@@ -113,12 +116,14 @@ func readLastUserMessage(r *os.File) string {
 	return last
 }
 
-func callEcho(sseURL, message string) (string, error) {
+func callEcho(mcpURL string, headers map[string]string, message string) (string, error) {
 	ctx := context.Background()
 
-	c, err := mcpclient.NewSSEMCPClient(sseURL)
+	c, err := mcpclient.NewStreamableHttpClient(mcpURL,
+		transport.WithHTTPHeaders(headers),
+	)
 	if err != nil {
-		return "", fmt.Errorf("create SSE client: %w", err)
+		return "", fmt.Errorf("create Streamable HTTP client: %w", err)
 	}
 	defer c.Close()
 

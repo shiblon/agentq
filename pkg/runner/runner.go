@@ -202,31 +202,32 @@ func parseResult(output []byte) (string, error) {
 
 // mcpConfigFile is the JSON structure written for --mcp-config.
 //
-// NOTE: format is a placeholder pending verification against the real claude CLI.
-// Two open questions:
-//  1. Does --mcp-config accept {"type":"sse"} or {"type":"http"} (Streamable HTTP)?
-//     claude mcp add-json currently says "stdio or SSE"; HTTP transport may not
-//     be exposed in the JSON format even though `claude mcp add --transport http`
-//     works interactively.
-//  2. If Streamable HTTP is supported, rebuild pkg/mcp/server.go on
-//     server.NewStreamableHTTPServer -- eliminates the claims-store entirely
-//     since WithHTTPContextFunc fires on every request, not just SSE messages.
-// Verify both by testing against the actual CLI before shipping.
+// Uses Streamable HTTP transport ("http" type). The session JWT is passed in
+// the X-AgentQ-Session-Config header -- it is configuration, not authentication,
+// so Authorization: Bearer is deliberately avoided.
+//
+// NOTE: verify the exact header key name and "type" value against the claude CLI
+// before shipping. `claude mcp add --transport http` works interactively; the
+// JSON format for --mcp-config may differ slightly.
 type mcpConfigFile struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
 }
 
 type mcpServerEntry struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func (r *Runner) writeMCPConfig(jwt string) (string, error) {
 	cfg := mcpConfigFile{
 		MCPServers: map[string]mcpServerEntry{
 			"agentq": {
-				Type: "sse",
-				URL:  r.cfg.MCPAddr + "/sse?token=" + jwt,
+				Type: "http",
+				URL:  r.cfg.MCPAddr + "/mcp",
+				Headers: map[string]string{
+					"X-AgentQ-Session-Config": jwt,
+				},
 			},
 		},
 	}

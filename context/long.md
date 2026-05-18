@@ -1,5 +1,26 @@
 # Long
 
+## mcp-transport
+## MCP transport: Streamable HTTP (settled 2026-05-18)
+
+Switched from SSE to Streamable HTTP (NewStreamableHTTPServer).
+
+Session JWT moves from ?token= query param to X-AgentQ-Session-Config header.
+Named deliberately: it is configuration, not authentication. Authorization: Bearer
+was rejected because it implies auth semantics.
+
+Server is stateless: WithHTTPContextFunc fires per-request, so no claims store,
+no session ID generator, no unregister hooks. Every request carries its own JWT.
+
+All paths require X-AgentQ-Session-Config. Previous SSE design had path-based
+routing (/sse validated, /message trusted the store); now every request is
+validated uniformly.
+
+Runner --mcp-config format: type:'http', url: base URL /mcp endpoint,
+headers: {'X-AgentQ-Session-Config': jwt}.
+
+Client: mcpclient.NewStreamableHttpClient(url, transport.WithHTTPHeaders(headers))
+
 ## mcp-jwt-trust-model
 ## MCP JWT trust model (settled 2026-05-18)
 
