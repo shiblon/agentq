@@ -1,178 +1,37 @@
 # Long
 
-## runner-cmd-policy
-## Runner command policy: baked in, not in payload
+## mcp-jwt-trust-model
+## MCP JWT trust model (settled 2026-05-18)
 
-The runner's command is fixed at deploy time (env var, startup flag, or compiled default).
-It is NOT part of the task payload.
+Three-party model: Supervisor vouches, AgentQ issues, MCP verifies.
 
-A runner image = one agent type. To run a different agent, deploy a different runner.
+**Supervisor**: vouches -- expresses what an agent may do for a specific task
+(messages, workdir, optional tool bans). Never holds a signing key.
 
-Rationale:
-- Container image is the capability enforcement boundary (what's installed = what can run)
-- Payload is data only; it cannot direct what binary to execute
-- A compromised task can only feed bad input to the fixed command -- it cannot pivot
-- No accidental arbitrary execution from a badly configured container
+**AgentQ**: issues -- holds the private signing key, mints the MCP config JWT
+encoding the Supervisor's intent intersected with the agent type's configured
+tool ceiling. The only component with issuance capability.
 
-This deliberately abandons the generality of the old exec worker (cmd in config/payload).
-The runner is a microservice, not a general-purpose subprocess launcher.
+**MCP server**: verifies -- holds only the public JWKS. Validates JWTs,
+extracts Claims (tools, workdir), enforces them. Cannot mint.
 
-## runner-auth-model
-## Runner auth model: two phases
+**Key storage**: Vault or similar in production. AgentQ fetches at startup,
+supports SIGHUP rotation (same pattern as NewTokenExchangerFromFiles).
+Dev path: local key file or ephemeral generated key; --insecure-skip-verification
+on MCP server bypasses validation entirely.
 
-### Short-term (prosumer / single-machine)
-Runner is a binary executor. Auth is a deployment concern, not a runner concern.
-- Mount claude auth files into the runner container (e.g. ~/.claude/)
-- Runner execs: claude --print --mcp-config <file>
-- claude CLI finds credentials and handles auth transparently
-- For API key users: ANTHROPIC_API_KEY in env, same runner binary
+## Agent type → tool set design
 
-Runner never touches credentials. What's mounted/set determines the auth model.
+- Each agent type has a configured tool ceiling (from agents.yaml).
+- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load.
+- tools: [] or absent = fail closed, zero tools permitted.
+- Task payload carries optional banned_tools list; Supervisor can narrow the
+  ceiling for a specific task. Absent = no bans.
+- AgentQ computes: (configured_tools - banned_tools) → JWT ToolAllowlist.
+- Workdir comes from the task payload (per-session, set by Supervisor).
 
-### Medium-term (API / multi-machine)
-For shared environments or multi-machine setups where mounting user credentials
-is impractical:
-- Scoped token passed to runner in task payload (agent_token)
-- Runner sets ANTHROPIC_API_KEY or AGENTQ_TOKEN in subprocess env
-- Follows the existing agent_token / AGENTQ_TOKEN pattern from exec worker
-
-### Design principle
-The runner binary is identical in both cases. Credential mode is deployment
-config, not application code.
-
-## agentq-runner-http-model
-## AgentQ + Runner: plain HTTP, eqlink is optional infrastructure
-
-AgentQ and Runner communicate via direct HTTP. Neither is queue-aware on the
-dispatch side -- AgentQ POSTs to a URL, Runner serves HTTP. That's the contract.
-
-eqlink is a sidecar that can be dropped in front of both:
-- AgentQ outbound sidecar: intercepts the HTTP POST, enqueues it
-- Runner inbound sidecar: watches the queue, calls the Runner's HTTP endpoint
-
-The application code is identical with or without eqlink. This means:
-
-**For testing:** wire AgentQ → Runner directly, no EntroQ needed.
-**For production:** add eqlink sidecars, get queue-backed flow control and scaling
-  for free -- no code changes.
-**For scaling policy:** token-budget throttling, connection-count HPA, etc. are
-  all expressed at the eqlink/queue layer, not in application code.
-
-JWT flow: Supervisor mints JWT → includes in task payload → AgentQ claims task
-→ forwards JWT in HTTP POST to Runner → Runner puts ?token=<jwt> in MCP SSE URL.
-AgentQ never mints; it just forwards what it received.
-
-## pi-supervisor-reference
-Pi (pi.dev) is a potential starting point for the supervisor harness.
-Look into it before reinventing the supervisor loop from scratch -- may cover
-turn-based orchestration, context management, and agent dispatch patterns.
-Goal: avoid reimplementing bulk of supervisor harness if Pi already handles it.
-
-## supervisor-mental-model
-### Core framing
-The supervisor is the 'chat AI with legions beneath it'. It is a long-running conversation
-that farms out work instead of doing any itself. All context management, compaction, and
-memory live here. Specialist agents are ephemeral hands; the supervisor is the brain.
-
-### Context ownership
-- Supervisor decides what context each task needs and includes it in the task payload.
-- AgentQ is a mechanical relay: reads task, issues JWT (carries tool allowlist + filesystem context
-  for MCP), dispatches to runner via eqlink, collects delta. No decisions.
-- Runner presents the JWT to MCP at SSE handshake -- no separate config call from AgentQ.
-- Delta per step = a new message in the supervisor's conversation.
-- Supervisor accumulates deltas and decides what to include in the next task (compaction is its problem).
-
-### Scaling
-- Supervisor workers are stateless -- task carries all context.
-- Multiple supervisor workers claim from the same queue; EntroQ load-balances.
-- Specialist agent pods scale the same way. Parallelism is free by construction.
-
-### Initial implementation
-- Turn-based, one session at a time. User waits for supervisor to return.
-- Supervisor loop: claim result task -> incorporate delta -> decide next step -> dispatch or return.
-- Concurrency is a performance optimization later, not a correctness requirement now.
-
-### What supervisor needs from result tasks
-- What the agent said (delta transcript)
-- What the agent did (file change log from MCP)
-- It does NOT need to understand how agents work, only what they reported.
-
-## What was built
-pkg/mcp/server.go -- Server type: New(tools) starts on random localhost port,
-URL() returns base URL for MCP client, Close(ctx) shuts down gracefully.
-Uses mark3labs/mcp-go v0.54.0 SSEServer as http.Handler over a net.Listener.
-
-pkg/mcp/tools.go -- SessionTools(session, agentName, sink) returns the two
-baseline tools every agent gets:
-  - read_session: returns session JSON (prompt, artifacts, metadata)
-  - write_artifact(type, content): appends an artifact via ArtifactSink callback
-
-CollectingSink() returns a sink + pointer to collected []models.Artifact.
-
-NOTE: This code reflects an earlier design where AgentQ started MCP per-task and
-injected baseline tools. The settled design (see deployment-architecture) uses MCP
-as a pool service with JWT-at-handshake; pkg/mcp needs to evolve to match.
-
-## MCP as the agent sandbox
-The sandboxing strategy for AgentQ: agents run in locked-down runner pods with
-NO shell, filesystem, or network access except:
-  1. The LLM API endpoint (e.g. Anthropic API)
-  2. The MCP service (a stateless pool, separate pod type)
-
-The MCP service is the capability enforcer. Configuration is carried in the JWT
-that AgentQ issues -- no separate admin call. MCP validates the JWT at SSE handshake,
-sets up the allowed tool list and filesystem context, and holds that configuration
-static for the duration of the session. The agent can only do what MCP exposes.
-
-This sidesteps the prompt injection / confused deputy problem structurally: the
-blast radius is bounded by the MCP tool set, not by system prompts.
-
-Prior design note: earlier iterations started MCP fresh per-task within the AgentQ
-worker pod. The settled design uses MCP as a long-lived pool service, configured
-via JWT at handshake, scaling independently of both AgentQ and Runner.
-
-## deployment-architecture
-### Four component types -- independent roles and scaling criteria
-
-**Supervisor** (chat harness, turn-based for now)
-- Long-running conversation; farms out work, never does it directly.
-- Owns context, compaction, memory. Specialist agents are ephemeral hands.
-- Scales: on user demand (like opening a terminal).
-
-**AgentQ worker** (worker + eqlink outbound)
-- Claims sessions from EntroQ inbox, issues signed JWT, bundles prompt + session context,
-  enqueues task onto runner queue via eqlink outbound.
-- Lightweight; never speaks directly to MCP or Runner.
-- Scales: on queue depth.
-
-**Runner** (eqlink inbound + runner process)
-- eqlink claims tasks from runner queue; runner receives JWT + prompt + session context.
-- Contacts MCP directly (presents JWT at SSE handshake), runs AI agent (Claude CLI or other).
-- Needs external egress for LLM API; can reach MCP service; nothing else.
-- Posts result back to EntroQ queue when done.
-- Scales: on token budget -- eqlink auto-queues when runner count lags AgentQ, so runner
-  pool can safely be smaller. (Specific token-budget scaling policy: tabled.)
-
-**MCP** (Deployment + Service, stateless pool)
-- Auto-configures on first session interaction via JWT (no separate admin call).
-- JWT carries: allowed tool list, volume, working directory, session ID, expiry, issuer.
-- Validates JWT at SSE handshake; stores allowlist as session state; filters tools/list response.
-- Allowlist is static for the session -- does not deviate mid-run.
-- SSE is multiplexed: one pod handles many concurrent agent sessions. Pod count need not match runner count.
-- Scales: on connection load (HPA on connection count / request rate).
-
-### JWT (issued by AgentQ, consumed by MCP)
-Claims: tool allowlist, volume, workdir, session ID, iss (AgentQ), exp (task duration upper bound).
-MCP protocol-level session ID is separate from this JWT.
-
-### Network policy
-- AgentQ: egress to EntroQ eqlink only.
-- Runner: egress to EntroQ eqlink + MCP Service ClusterIP + AI API (external).
-- MCP: ingress from Runner; egress as needed for tool implementation (git, web, etc.).
-
-### What this solved vs. prior design
-Prior: single pod with AgentQ+MCP+Runner sharing network namespace (MCP egress bled to AgentQ).
-Current: four separate component types, proper network isolation via NetworkPolicy, independent scaling.
+## agents.yaml additions
+Each agent entry gains: runner_url, mcp_addr, tools (list or ["*"]).
 
 ## workspace-file-sharing
 Design decided: Gitea for VCS, MinIO for large/binary files.
@@ -393,6 +252,78 @@ Premortem and security research session (2026-04-26). Full research docs in docs
 ## artifact-filesystem-model
 
 
+## supervisor-mental-model
+### Core framing
+The supervisor is the 'chat AI with legions beneath it'. It is a long-running conversation
+that farms out work instead of doing any itself. All context management, compaction, and
+memory live here. Specialist agents are ephemeral hands; the supervisor is the brain.
+
+### Context ownership
+- Supervisor decides what context each task needs and includes it in the task payload.
+- AgentQ is a mechanical relay: reads task, issues JWT (carries tool allowlist + filesystem context
+  for MCP), dispatches to runner via eqlink, collects delta. No decisions.
+- Runner presents the JWT to MCP at SSE handshake -- no separate config call from AgentQ.
+- Delta per step = a new message in the supervisor's conversation.
+- Supervisor accumulates deltas and decides what to include in the next task (compaction is its problem).
+
+### Scaling
+- Supervisor workers are stateless -- task carries all context.
+- Multiple supervisor workers claim from the same queue; EntroQ load-balances.
+- Specialist agent pods scale the same way. Parallelism is free by construction.
+
+### Initial implementation
+- Turn-based, one session at a time. User waits for supervisor to return.
+- Supervisor loop: claim result task -> incorporate delta -> decide next step -> dispatch or return.
+- Concurrency is a performance optimization later, not a correctness requirement now.
+
+### What supervisor needs from result tasks
+- What the agent said (delta transcript)
+- What the agent did (file change log from MCP)
+- It does NOT need to understand how agents work, only what they reported.
+
+## deployment-architecture
+### Four component types -- independent roles and scaling criteria
+
+**Supervisor** (chat harness, turn-based for now)
+- Long-running conversation; farms out work, never does it directly.
+- Owns context, compaction, memory. Specialist agents are ephemeral hands.
+- Scales: on user demand (like opening a terminal).
+
+**AgentQ worker** (worker + eqlink outbound)
+- Claims sessions from EntroQ inbox, issues signed JWT, bundles prompt + session context,
+  enqueues task onto runner queue via eqlink outbound.
+- Lightweight; never speaks directly to MCP or Runner.
+- Scales: on queue depth.
+
+**Runner** (eqlink inbound + runner process)
+- eqlink claims tasks from runner queue; runner receives JWT + prompt + session context.
+- Contacts MCP directly (presents JWT at SSE handshake), runs AI agent (Claude CLI or other).
+- Needs external egress for LLM API; can reach MCP service; nothing else.
+- Posts result back to EntroQ queue when done.
+- Scales: on token budget -- eqlink auto-queues when runner count lags AgentQ, so runner
+  pool can safely be smaller. (Specific token-budget scaling policy: tabled.)
+
+**MCP** (Deployment + Service, stateless pool)
+- Auto-configures on first session interaction via JWT (no separate admin call).
+- JWT carries: allowed tool list, volume, working directory, session ID, expiry, issuer.
+- Validates JWT at SSE handshake; stores allowlist as session state; filters tools/list response.
+- Allowlist is static for the session -- does not deviate mid-run.
+- SSE is multiplexed: one pod handles many concurrent agent sessions. Pod count need not match runner count.
+- Scales: on connection load (HPA on connection count / request rate).
+
+### JWT (issued by AgentQ, consumed by MCP)
+Claims: tool allowlist, volume, workdir, session ID, iss (AgentQ), exp (task duration upper bound).
+MCP protocol-level session ID is separate from this JWT.
+
+### Network policy
+- AgentQ: egress to EntroQ eqlink only.
+- Runner: egress to EntroQ eqlink + MCP Service ClusterIP + AI API (external).
+- MCP: ingress from Runner; egress as needed for tool implementation (git, web, etc.).
+
+### What this solved vs. prior design
+Prior: single pod with AgentQ+MCP+Runner sharing network namespace (MCP egress bled to AgentQ).
+Current: four separate component types, proper network isolation via NetworkPolicy, independent scaling.
+
 ## Artifact and Filesystem Model (settled 2026-05-16)
 ### Core model
 - Session working directory on shared volume (NFS now, RustFS later -- MinIO went closed source)
@@ -419,6 +350,40 @@ AgentQ returns to supervisor:
 - File change log: from MCP tool events (what was created/modified/deleted)
 - Step metadata: agent name, duration, exit status, step number
 - Inline content or URI reference -- both supported, supervisor handles either
+
+## MCP as the agent sandbox
+The sandboxing strategy for AgentQ: agents run in locked-down runner pods with
+NO shell, filesystem, or network access except:
+  1. The LLM API endpoint (e.g. Anthropic API)
+  2. The MCP service (a stateless pool, separate pod type)
+
+The MCP service is the capability enforcer. Configuration is carried in the JWT
+that AgentQ issues -- no separate admin call. MCP validates the JWT at SSE handshake,
+sets up the allowed tool list and filesystem context, and holds that configuration
+static for the duration of the session. The agent can only do what MCP exposes.
+
+This sidesteps the prompt injection / confused deputy problem structurally: the
+blast radius is bounded by the MCP tool set, not by system prompts.
+
+Prior design note: earlier iterations started MCP fresh per-task within the AgentQ
+worker pod. The settled design uses MCP as a long-lived pool service, configured
+via JWT at handshake, scaling independently of both AgentQ and Runner.
+
+## What was built
+pkg/mcp/server.go -- Server type: New(tools) starts on random localhost port,
+URL() returns base URL for MCP client, Close(ctx) shuts down gracefully.
+Uses mark3labs/mcp-go v0.54.0 SSEServer as http.Handler over a net.Listener.
+
+pkg/mcp/tools.go -- SessionTools(session, agentName, sink) returns the two
+baseline tools every agent gets:
+  - read_session: returns session JSON (prompt, artifacts, metadata)
+  - write_artifact(type, content): appends an artifact via ArtifactSink callback
+
+CollectingSink() returns a sink + pointer to collected []models.Artifact.
+
+NOTE: This code reflects an earlier design where AgentQ started MCP per-task and
+injected baseline tools. The settled design (see deployment-architecture) uses MCP
+as a pool service with JWT-at-handshake; pkg/mcp needs to evolve to match.
 
 ## The skeleton without bones
 agentq has the right *shapes* for security -- the Authorizer interface, UserID
@@ -858,4 +823,75 @@ Third-party caveat property (killer feature): a Macaroon can contain a caveat th
 
 ## Queue ACLs
 entroq already has per-queue permission support in the API. The work is wiring it: supervisor credential gets write-only on agent queues; each agent credential gets read-only on its own queue. This makes the queue-as-authorization-boundary claim structural rather than architectural.
+
+## pi-supervisor-reference
+Pi (pi.dev) is a potential starting point for the supervisor harness.
+Look into it before reinventing the supervisor loop from scratch -- may cover
+turn-based orchestration, context management, and agent dispatch patterns.
+Goal: avoid reimplementing bulk of supervisor harness if Pi already handles it.
+
+## agentq-runner-http-model
+
+
+## runner-auth-model
+
+
+## runner-cmd-policy
+
+
+## Runner command policy: baked in, not in payload
+The runner's command is fixed at deploy time (env var, startup flag, or compiled default).
+It is NOT part of the task payload.
+
+A runner image = one agent type. To run a different agent, deploy a different runner.
+
+Rationale:
+- Container image is the capability enforcement boundary (what's installed = what can run)
+- Payload is data only; it cannot direct what binary to execute
+- A compromised task can only feed bad input to the fixed command -- it cannot pivot
+- No accidental arbitrary execution from a badly configured container
+
+This deliberately abandons the generality of the old exec worker (cmd in config/payload).
+The runner is a microservice, not a general-purpose subprocess launcher.
+
+## Runner auth model: two phases
+### Short-term (prosumer / single-machine)
+Runner is a binary executor. Auth is a deployment concern, not a runner concern.
+- Mount claude auth files into the runner container (e.g. ~/.claude/)
+- Runner execs: claude --print --mcp-config <file>
+- claude CLI finds credentials and handles auth transparently
+- For API key users: ANTHROPIC_API_KEY in env, same runner binary
+
+Runner never touches credentials. What's mounted/set determines the auth model.
+
+### Medium-term (API / multi-machine)
+For shared environments or multi-machine setups where mounting user credentials
+is impractical:
+- Scoped token passed to runner in task payload (agent_token)
+- Runner sets ANTHROPIC_API_KEY or AGENTQ_TOKEN in subprocess env
+- Follows the existing agent_token / AGENTQ_TOKEN pattern from exec worker
+
+### Design principle
+The runner binary is identical in both cases. Credential mode is deployment
+config, not application code.
+
+## AgentQ + Runner: plain HTTP, eqlink is optional infrastructure
+AgentQ and Runner communicate via direct HTTP. Neither is queue-aware on the
+dispatch side -- AgentQ POSTs to a URL, Runner serves HTTP. That's the contract.
+
+eqlink is a sidecar that can be dropped in front of both:
+- AgentQ outbound sidecar: intercepts the HTTP POST, enqueues it
+- Runner inbound sidecar: watches the queue, calls the Runner's HTTP endpoint
+
+The application code is identical with or without eqlink. This means:
+
+**For testing:** wire AgentQ → Runner directly, no EntroQ needed.
+**For production:** add eqlink sidecars, get queue-backed flow control and scaling
+  for free -- no code changes.
+**For scaling policy:** token-budget throttling, connection-count HPA, etc. are
+  all expressed at the eqlink/queue layer, not in application code.
+
+JWT flow: Supervisor mints JWT → includes in task payload → AgentQ claims task
+→ forwards JWT in HTTP POST to Runner → Runner puts ?token=<jwt> in MCP SSE URL.
+AgentQ never mints; it just forwards what it received.
 

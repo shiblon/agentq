@@ -7,6 +7,7 @@ QUBIT.md
 .gemini
 .claude
 /agentq
+/echoagent
 
 # engram database
 .claude/engram.db
