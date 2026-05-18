@@ -4,7 +4,6 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 
@@ -29,6 +28,9 @@ type SubmitRequest struct {
 	HumanToken       string // raw bearer token; stored for delegated agent token exchange
 	Compact          bool   // hint to supervisor to summarize inherited context
 	ProvenanceIssuer *approval.ProvenanceIssuer // if set, mints a provenance token for this session
+	// SupervisorQueue is the EntroQ queue to enqueue the supervisor task on.
+	// Defaults to "agentq/supervisor/inbox" if empty.
+	SupervisorQueue string
 }
 
 // SubmitSession creates a new session and enqueues it for the supervisor.
@@ -83,18 +85,23 @@ func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, req 
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
+	supervisorQueue := req.SupervisorQueue
+	if supervisorQueue == "" {
+		supervisorQueue = "agentq/supervisor/inbox"
+	}
+
 	sessionURI := store.SessionURI(session.ID)
-	payload := map[string]any{}
+	payload := map[string]any{
+		"messages": []map[string]any{
+			{"role": "user", "content": req.Prompt},
+		},
+	}
 	if session.Meta.ProvenanceToken != "" {
 		payload["provenance_token"] = session.Meta.ProvenanceToken
 	}
-	task := models.NewTask("supervisor", sessionURI, payload)
-	taskBytes, err := json.Marshal(task)
-	if err != nil {
-		return nil, fmt.Errorf("marshal supervisor task: %w", err)
-	}
+	task := models.NewTask(supervisorQueue, sessionURI, payload)
 
-	if _, err := eq.Modify(ctx, entroq.InsertingInto("supervisor", entroq.WithRawValue(taskBytes))); err != nil {
+	if _, err := eq.Modify(ctx, entroq.InsertingInto(supervisorQueue, entroq.WithValue(task))); err != nil {
 		return nil, fmt.Errorf("enqueue supervisor task: %w", err)
 	}
 

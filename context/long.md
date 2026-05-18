@@ -1,5 +1,104 @@
 # Long
 
+## pending-work
+## Pending work before manual test (2026-05-18)
+
+**Immediate (blocks manual test):**
+
+1. Add ReplyTo to mcp.Claims -- dispatch_to_agent reads reply_to from JWT claims instead of static server config.
+   - Add ReplyTo string to mcp.Claims (claim key: mcp_reply_to)
+   - Supervisor mints JWT with ReplyTo = its own inbox queue
+   - dispatch_to_agent reads c.ReplyTo from claims instead of supervisorQueue param
+   - AllOrchestrationTools signature drops supervisorQueue param
+   - mcp.Config drops SupervisorQueue field
+
+2. Add --eq-addr to agentq mcp serve -- wire openEQ into runMCPServe, populate cfg.EQ.
+   - Only --eq-addr needed (no --supervisor-queue since that moves to JWT)
+   - Keep --queue-namespace (default agentq)
+
+**Already done:**
+- pkg/mcp: Streamable HTTP, JWT allowlist, all tool sets, dispatch_to_agent
+- pkg/runner: claude CLI runner microservice  
+- pkg/workers/agentq: leaf agent worker
+- pkg/workers/supervisor: supervisor worker (replaces old LLM-routing supervisor)
+- agentq submit: one-shot prompt CLI
+- Old pkg/workers/supervisor (LLM routing) deleted
+- models.UserReplyQueue: deterministic reply queue from session ID
+
+**Later:**
+- Different runner types (API-based, non-claude CLI)
+- MCP behind eqlink (deferred, see mcp-eqlink-option)
+- Compact mode: supervisor LLM summarization of inherited artifacts (stub exists in session meta)
+
+## system-architecture
+## System architecture (updated 2026-05-18)
+
+Four components, all in cmd/agentq:
+
+**MCP server** (pkg/mcp, agentq mcp serve :8081)
+- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
+- Tools: file, git, go, search tools + dispatch_to_agent (when started with EQ)
+- dispatch_to_agent inserts tasks into agent queues; reply_to comes from JWT ReplyTo claim (NOT server config)
+- Key: agentq mcp serve --jwks-file / --insecure-skip-verification
+- EQ flags: --eq-addr (enables dispatch_to_agent), --queue-namespace (default: agentq)
+- NOTE: --eq-addr flag not yet added to CLI; pending
+
+**Runner** (pkg/runner, agentq runner serve :8082)
+- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
+- Writes --mcp-config tempfile, invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
+- Config: --command (default: claude), --args (default: --print), --mcp-addr
+
+**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
+- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner, posts result to task.ReplyTo
+- Reads runner_url and mcp_addr from agents.yaml
+- Key: --key-file / --insecure-no-keys
+
+**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
+- Claims from agentq/supervisor/inbox (single queue: user prompts + agent replies)
+- User prompt task: payload.messages present
+- Agent reply task: payload.from_agent + payload.output present
+- Loads session, loads saved transcript from supervisor_transcript artifact, builds transcript, mints JWT with dispatch_to_agent, calls runner, saves updated transcript, posts output to models.UserReplyQueue(sessionID)
+- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools (default: dispatch_to_agent)
+
+**Submit CLI** (agentq submit)
+- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}], blocks on models.UserReplyQueue(sessionID), prints output
+
+**Reply queue** (models.UserReplyQueue)
+- Deterministic: agentq/sessions/<id>/reply
+- No stored field in session; derived from session ID by both submit and supervisor
+
+## runner-types
+## Runner extensibility (noted 2026-05-18)
+
+Current runner (pkg/runner) is claude-CLI-specific: hardcodes --mcp-config, --input-format stream-json, --output-format stream-json, --verbose. Future runner types will be needed:
+- API-based (Claude API, OpenAI, Gemini) -- no subprocess, no stream-json
+- Different CLI tools (other agentic CLIs)
+- Possibly language-specific runners (Python SDK, etc.)
+
+The runner interface is already well-defined (RunRequest / RunResponse over HTTP), so adding new runner implementations is straightforward. The AgentQ worker and supervisor just POST to a URL -- they don't care what's behind it.
+
+Don't abstract prematurely. Keep the current claude runner as-is; add new runner packages when a second one is actually needed.
+
+## mcp-eqlink-option
+## MCP behind eqlink -- future option (noted 2026-05-18)
+
+With Streamable HTTP transport, Runner→MCP is pure request-response when
+WithDisableStreaming(true) is set. This makes it compatible with eqlink,
+which would make ALL inter-service communication queue-mediated.
+
+Upside: uniform backpressure, audit logging, scaling across the whole mesh
+(AgentQ→Runner AND Runner→MCP), one operational model throughout.
+
+Downside: MCP tool calls are low-latency (agent is blocked waiting); queue
+round-trip adds latency for every git status, file read, etc.
+
+Caveat: any MCP server-push features (progress notifications, sampling
+requests) would break through eqlink since eqlink rejects SSE/WebSocket.
+Requires WithDisableStreaming(true) on the MCP server.
+
+Not worth doing now. Revisit if MCP becomes a scaling bottleneck or if
+uniform queue-mediation becomes a priority for the audit story.
+
 ## mcp-transport
 ## MCP transport: Streamable HTTP (settled 2026-05-18)
 

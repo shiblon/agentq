@@ -14,6 +14,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/shiblon/entroq"
 )
 
 // SessionConfigHeader is the HTTP header carrying the MCP session JWT.
@@ -43,6 +44,20 @@ type Config struct {
 	// never be available in production. Controlled independently of
 	// InsecureSkipVerification -- both can be set independently.
 	DevTools bool
+
+	// EQ is the EntroQ client used by orchestration tools (dispatch_to_agent).
+	// If nil, orchestration tools are not registered.
+	EQ *entroq.EntroQ
+
+	// SupervisorQueue is this MCP server's supervisor inbox. Set as reply_to
+	// on tasks created by dispatch_to_agent so leaf agents know where to return
+	// results. Only used when EQ is set.
+	SupervisorQueue string
+
+	// QueueNamespace is the prefix for agent queue names, e.g. "agentq".
+	// dispatch_to_agent constructs queues as <namespace>/<agent>/inbox.
+	// Defaults to "agentq" when EQ is set.
+	QueueNamespace string
 }
 
 type claimsContextKey struct{}
@@ -100,6 +115,13 @@ func New(cfg Config) (*Server, error) {
 	tools := AllTools()
 	if cfg.DevTools {
 		tools = append(tools, AllDevTools()...)
+	}
+	if cfg.EQ != nil {
+		ns := cfg.QueueNamespace
+		if ns == "" {
+			ns = "agentq"
+		}
+		tools = append(tools, AllOrchestrationTools(cfg.EQ, cfg.SupervisorQueue, ns)...)
 	}
 	mcpSrv.AddTools(tools...)
 

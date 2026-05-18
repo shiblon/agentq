@@ -58,6 +58,8 @@ func init() {
 	mcpServeCmd.Flags().String("issuer", "agentq", "Expected iss claim in session tokens")
 	mcpServeCmd.Flags().Bool("insecure-skip-verification", false, "Skip JWT signature verification. Claims are still parsed and dynamic per-session. Never use in production.")
 	mcpServeCmd.Flags().Bool("dev-tools", false, "Enable development-only tools (e.g. echo). Never use in production.")
+	mcpServeCmd.Flags().String("supervisor-queue", "agentq/supervisor/inbox", "Supervisor inbox queue; set as reply_to on dispatch_to_agent tasks. Required when --eq-addr is set.")
+	mcpServeCmd.Flags().String("queue-namespace", "agentq", "Prefix for agent queue names (dispatch_to_agent constructs <namespace>/<agent>/inbox). Only used when --eq-addr is set.")
 
 	mcpKeygenCmd.Flags().String("out-dir", ".", "Directory to write private.jwk and public.jwks")
 	mcpKeygenCmd.Flags().String("algorithm", "ES256", "Signing algorithm: ES256 (ECDSA P-256, default) or RS256 (RSA 2048)")

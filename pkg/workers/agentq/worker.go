@@ -133,17 +133,19 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		return nil, fmt.Errorf("agentq %s: runner: %w", w.cfg.Name, err)
 	}
 
-	resultTask := models.NewTask(w.cfg.ReplyQueue, appTask.SessionURI, map[string]any{
+	// Use the task's ReplyTo if set (session-specific return address),
+	// otherwise fall back to the worker's configured reply queue.
+	replyQueue := appTask.ReplyTo
+	if replyQueue == "" {
+		replyQueue = w.cfg.ReplyQueue
+	}
+	resultTask := models.NewTask(replyQueue, appTask.SessionURI, map[string]any{
 		"from_agent": w.cfg.Name,
 		"output":     output,
 	})
-	resultBytes, err := json.Marshal(resultTask)
-	if err != nil {
-		return nil, fmt.Errorf("agentq %s: marshal result: %w", w.cfg.Name, err)
-	}
 
 	return []entroq.ModifyArg{
-		entroq.InsertingInto(w.cfg.ReplyQueue, entroq.WithRawValue(resultBytes)),
+		entroq.InsertingInto(replyQueue, entroq.WithValue(resultTask)),
 		task.Delete(),
 	}, nil
 }

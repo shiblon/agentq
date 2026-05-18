@@ -1,0 +1,149 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/shiblon/agentq/pkg/mcp"
+	"github.com/shiblon/agentq/pkg/models"
+	"github.com/shiblon/agentq/pkg/workers/supervisor"
+	"github.com/shiblon/entroq"
+	eqworker "github.com/shiblon/entroq/pkg/worker"
+	"github.com/spf13/cobra"
+)
+
+var supervisorCmd = &cobra.Command{
+	Use:   "supervisor",
+	Short: "Supervisor worker commands",
+}
+
+var supervisorServeCmd = &cobra.Command{
+	Use:   "serve",
+	Short: "Start the supervisor worker",
+	Long: `Start the supervisor worker. It claims tasks from a single inbox queue,
+handling both incoming user prompts and agent replies. Each turn it calls the
+runner, which invokes the agent command with the dispatch_to_agent tool wired
+to an MCP server backed by EntroQ.
+
+Key management (choose one):
+  --key-file path          load private key from a JWK file (agentq mcp keygen)
+  --insecure-no-keys       generate an ephemeral key at startup; pair with
+                           agentq mcp serve --insecure-skip-verification`,
+	RunE: runSupervisorServe,
+}
+
+func init() {
+	rootCmd.AddCommand(supervisorCmd)
+	supervisorCmd.AddCommand(supervisorServeCmd)
+
+	supervisorServeCmd.Flags().String("queue", "agentq/supervisor/inbox", "Supervisor inbox queue name")
+	supervisorServeCmd.Flags().String("key-file", "", "Path to private JWK file for minting MCP session JWTs")
+	supervisorServeCmd.Flags().Bool("insecure-no-keys", false, "Generate an ephemeral signing key at startup. Pair with --insecure-skip-verification on the MCP server.")
+	supervisorServeCmd.Flags().String("issuer", "agentq", "Issuer claim placed in minted JWTs")
+	supervisorServeCmd.Flags().String("runner-url", "", "Base URL of the runner microservice, e.g. http://runner:8082")
+	supervisorServeCmd.Flags().String("mcp-addr", "", "Base URL of the MCP pool server (must have dispatch_to_agent registered)")
+	supervisorServeCmd.Flags().String("tools", "dispatch_to_agent", "Comma-separated list of MCP tools the supervisor may use")
+	supervisorServeCmd.Flags().String("default-workdir", "", "Fallback workdir when session has no workspace configured")
+
+	_ = supervisorServeCmd.MarkFlagRequired("runner-url")
+	_ = supervisorServeCmd.MarkFlagRequired("mcp-addr")
+}
+
+func runSupervisorServe(cmd *cobra.Command, _ []string) error {
+	queue, _ := cmd.Flags().GetString("queue")
+	keyFile, _ := cmd.Flags().GetString("key-file")
+	noKeys, _ := cmd.Flags().GetBool("insecure-no-keys")
+	issuer, _ := cmd.Flags().GetString("issuer")
+	runnerURL, _ := cmd.Flags().GetString("runner-url")
+	mcpAddr, _ := cmd.Flags().GetString("mcp-addr")
+	toolsStr, _ := cmd.Flags().GetString("tools")
+	defaultWorkdir, _ := cmd.Flags().GetString("default-workdir")
+
+	if keyFile == "" && !noKeys {
+		return fmt.Errorf("one of --key-file or --insecure-no-keys is required")
+	}
+	if keyFile != "" && noKeys {
+		return fmt.Errorf("--key-file and --insecure-no-keys are mutually exclusive")
+	}
+
+	var tools []string
+	for _, t := range strings.Split(toolsStr, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			tools = append(tools, t)
+		}
+	}
+
+	var (
+		kp  *mcp.KeyPair
+		err error
+	)
+	if noKeys {
+		log.Printf("supervisor: --insecure-no-keys: generating ephemeral signing key")
+		kp, err = mcp.GenerateEphemeralKey()
+		if err != nil {
+			return fmt.Errorf("generate ephemeral key: %w", err)
+		}
+	} else {
+		key, err := mcp.LoadPrivateKey(keyFile)
+		if err != nil {
+			return fmt.Errorf("load key: %w", err)
+		}
+		kp = &mcp.KeyPair{Private: key}
+	}
+
+	log.Printf("supervisor: claiming from %q, runner=%s, mcp=%s, tools=%v", queue, runnerURL, mcpAddr, tools)
+
+	workerCfg := supervisor.Config{
+		Issuer:         issuer,
+		PrivKey:        kp.Private,
+		MCPAddr:        mcpAddr,
+		RunnerURL:      runnerURL,
+		Tools:          tools,
+		DefaultWorkdir: defaultWorkdir,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	eq, err := openEQ(ctx)
+	if err != nil {
+		return err
+	}
+	defer eq.Close()
+
+	w := supervisor.New(workerCfg, eq)
+
+	// SIGHUP reloads the signing key (no-op with --insecure-no-keys).
+	if keyFile != "" {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGHUP)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-sigs:
+					key, err := mcp.LoadPrivateKey(keyFile)
+					if err != nil {
+						log.Printf("supervisor: key reload failed: %v", err)
+					} else {
+						w.ReloadKey(key)
+						log.Printf("supervisor: signing key reloaded")
+					}
+				}
+			}
+		}()
+	}
+
+	log.Printf("supervisor: starting on queue %q", queue)
+	return eqworker.New(eq,
+		eqworker.WithDoModify(func(ctx context.Context, task *entroq.Task, appTask models.Task, _ []*entroq.Doc) ([]entroq.ModifyArg, error) {
+			return w.ProcessTask(ctx, task, appTask)
+		}),
+	).Run(ctx, eqworker.Watching(queue))
+}

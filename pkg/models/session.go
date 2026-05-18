@@ -44,6 +44,13 @@ type SessionMeta struct {
 	ProvenanceToken string `json:"provenance_token,omitempty"`
 }
 
+// UserReplyQueue returns the deterministic queue name for delivering supervisor
+// output back to the user. Derived from the session ID so no stored field is
+// needed; any caller that knows the session ID can compute it.
+func UserReplyQueue(sessionID string) string {
+	return "agentq/sessions/" + sessionID + "/reply"
+}
+
 // Session represents a user-initiated workflow with session context.
 // It tracks artifacts produced, and provides context for routing decisions.
 type Session struct {
