@@ -1,0 +1,101 @@
+// agentq component architecture
+//
+// Render: dot -Tsvg docs/architecture.dot -o docs/architecture.svg
+//         dot -Tpng docs/architecture.dot -o docs/architecture.png
+//
+// Two communication layers are distinguished:
+//   solid edges  — queue-mediated (through EntroQ)
+//   dashed edges — direct HTTP between components
+
+digraph agentq_architecture {
+  rankdir=LR
+  compound=true
+  splines=ortho
+  nodesep=0.6
+  ranksep=1.0
+
+  graph [
+    label="agentq: Component Architecture"
+    labelloc=t
+    fontname="Helvetica Bold"
+    fontsize=14
+  ]
+  node [fontname="Helvetica" fontsize=11 style=filled]
+  edge [fontname="Helvetica" fontsize=9]
+
+  // ── actors ──────────────────────────────────────────────────────────────
+  human [
+    label="Human\n(CLI / API)"
+    shape=box style="rounded,filled" fillcolor="#FFFFFF"
+  ]
+
+  // ── EntroQ: the queue hub ────────────────────────────────────────────────
+  subgraph cluster_entroq {
+    label="EntroQ  (durable task queue)"
+    fontname="Helvetica Bold"
+    fontsize=11
+    style=filled
+    fillcolor="#FFFDE7"
+    color="#F9A825"
+
+    sup_inbox    [label="supervisor/inbox"     shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+    agent_inbox  [label="‹agent›/inbox"        shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+    reply_queue  [label="sessions/‹id›/reply"  shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+  }
+
+  // ── workers ──────────────────────────────────────────────────────────────
+  supervisor [
+    label="Supervisor\nWorker"
+    shape=box style="rounded,filled" fillcolor="#BBDEFB"
+  ]
+
+  agentq [
+    label="AgentQ Worker\n(one per agent role)"
+    shape=box style="rounded,filled" fillcolor="#BBDEFB"
+  ]
+
+  // ── runner ───────────────────────────────────────────────────────────────
+  runner [
+    label="Runner\n(HTTP :8082)\n\nexecs: claude --print\nwrites --mcp-config"
+    shape=box style="rounded,filled" fillcolor="#E8EAF6"
+  ]
+
+  // ── MCP server ───────────────────────────────────────────────────────────
+  mcp [
+    label="MCP Server\n(stateless pool, :8081)\n\nJWT validates:\n· tool allowlist\n· workdir scope"
+    shape=box style="rounded,filled" fillcolor="#E8F5E9"
+  ]
+
+  // ── queue-mediated edges (solid) ─────────────────────────────────────────
+  human       -> sup_inbox   [label="submit prompt"]
+  reply_queue -> human       [label="result"]
+
+  sup_inbox   -> supervisor  [label="claim"]
+  supervisor  -> reply_queue [label="post result"]
+
+  agent_inbox -> agentq      [label="claim"]
+  agentq      -> sup_inbox   [label="post result"]
+
+  // dispatch_to_agent: MCP tool inserts task into EntroQ (dashed = HTTP origin)
+  mcp -> agent_inbox [
+    label="dispatch_to_agent\n(inserts task)"
+    style=dashed color="#388E3C" fontcolor="#388E3C"
+  ]
+
+  // ── direct HTTP edges (dashed) ────────────────────────────────────────────
+  supervisor -> runner [
+    label="HTTP POST\nJWT {dispatch_to_agent,\n  workdir}"
+    style=dashed color="#1565C0" fontcolor="#1565C0"
+  ]
+  agentq -> runner [
+    label="HTTP POST\nJWT {file, git, search, …\n  workdir}"
+    style=dashed color="#1565C0" fontcolor="#1565C0"
+  ]
+  runner -> mcp [
+    label="Streamable HTTP\nJWT on every request"
+    style=dashed color="#1565C0" fontcolor="#1565C0"
+  ]
+
+  // ── ranking hints ─────────────────────────────────────────────────────────
+  { rank=same supervisor agentq }
+}

@@ -1,0 +1,88 @@
+// agentq request flow
+//
+// Render: dot -Tsvg docs/flow.dot -o docs/flow.svg
+//         dot -Tpng docs/flow.dot -o docs/flow.png
+//
+// Shows the temporal sequence of a single session: from user submit,
+// through one or more supervisor/agent turns, to the final reply.
+// The supervisor loop repeats until the LLM decides the session is done
+// or escalates for human review.
+
+digraph agentq_flow {
+  rankdir=TB
+  splines=ortho
+  nodesep=0.5
+  ranksep=0.7
+
+  graph [
+    label="agentq: Request Flow"
+    labelloc=t
+    fontname="Helvetica Bold"
+    fontsize=14
+  ]
+  node [fontname="Helvetica" fontsize=11 style=filled]
+  edge [fontname="Helvetica" fontsize=9]
+
+  // ── start / end ────────────────────────────────────────────────────────
+  start [label="Human submits prompt"   shape=ellipse fillcolor="#FFFFFF"]
+  done  [label="Human receives result"  shape=ellipse fillcolor="#FFFFFF"]
+
+  // ── queue nodes ────────────────────────────────────────────────────────
+  sup_inbox   [label="supervisor/inbox"    shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+  agent_inbox [label="‹agent›/inbox"       shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+  reply_queue [label="sessions/‹id›/reply" shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+  review_q    [label="human_review queue"  shape=cylinder fillcolor="#FFF9C4" color="#F9A825"]
+
+  // ── processing nodes ───────────────────────────────────────────────────
+  supervisor_turn [
+    label="Supervisor Worker\n─────────────────────\nclaim task\nmint JWT {dispatch_to_agent}\ncall Runner → Claude (LLM)\n  LLM may call dispatch_to_agent\n  LLM may call other MCP tools\nsave transcript artifact"
+    shape=box style="rounded,filled" fillcolor="#BBDEFB"
+  ]
+
+  supervisor_decide [
+    label="What does the\nLLM want to do?"
+    shape=diamond fillcolor="#E3F2FD"
+  ]
+
+  agent_turn [
+    label="AgentQ Worker\n─────────────────────\nclaim task\nmint JWT {file, git, search, …}\ncall Runner → Claude (LLM)\n  LLM uses file/git/search tools\npost result → supervisor/inbox"
+    shape=box style="rounded,filled" fillcolor="#BBDEFB"
+  ]
+
+  review [
+    label="Human Review\n─────────────────────\napprove or reject\n(CLI: agentq review\n Web UI: Review tab)"
+    shape=box style="rounded,filled" fillcolor="#FFCCBC"
+  ]
+
+  // ── flow ───────────────────────────────────────────────────────────────
+  start -> sup_inbox [label="insert task\n{messages: [{role:user, content:…}]}"]
+
+  sup_inbox -> supervisor_turn [label="claim"]
+  supervisor_turn -> supervisor_decide
+
+  // decision branches
+  supervisor_decide -> reply_queue  [label="session complete"]
+  supervisor_decide -> agent_inbox  [label="dispatch_to_agent\n(MCP tool call → EntroQ insert)"]
+  supervisor_decide -> review_q     [label="escalate\n(rubric match)"]
+
+  // agent turn completes, result goes back to supervisor
+  agent_inbox -> agent_turn [label="claim"]
+  agent_turn  -> sup_inbox  [label="post result\n{from_agent: ‹name›, output: …}"]
+
+  // human review completes, result goes back to supervisor
+  review_q -> review
+  review   -> sup_inbox [label="approved / rejected\n→ new supervisor turn"]
+
+  // loop label (not a real edge, just a note)
+  sup_inbox -> supervisor_turn [
+    label="next turn\n(agent result or\nreview outcome)"
+    style=dashed color="#78909C" fontcolor="#78909C"
+  ]
+
+  // final result delivered
+  reply_queue -> done [label="claim (agentq submit blocks here)"]
+
+  // ── layout hints ────────────────────────────────────────────────────────
+  { rank=same agent_inbox review_q }
+  { rank=same agent_turn  review   }
+}
