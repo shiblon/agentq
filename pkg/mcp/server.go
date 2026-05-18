@@ -59,6 +59,26 @@ type Server struct {
 
 	mu     sync.RWMutex
 	claims map[string]*Claims // mcp session ID → Claims
+
+	keysMu  sync.RWMutex
+	pubKeys jwk.Set // guarded by keysMu; use getPublicKeys / ReloadPublicKeys
+	issuer  string
+}
+
+// ReloadPublicKeys atomically replaces the public key set used for JWT
+// verification. Safe to call from a signal handler goroutine while the server
+// is handling requests. Intended for SIGHUP-triggered key rotation when using
+// --jwks-file with Vault Agent or similar. No-op in --insecure-skip-verification mode.
+func (s *Server) ReloadPublicKeys(set jwk.Set) {
+	s.keysMu.Lock()
+	s.pubKeys = set
+	s.keysMu.Unlock()
+}
+
+func (s *Server) getPublicKeys() jwk.Set {
+	s.keysMu.RLock()
+	defer s.keysMu.RUnlock()
+	return s.pubKeys
 }
 
 // New constructs a Server from cfg. Call Start to begin accepting connections.
@@ -68,7 +88,9 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		claims: make(map[string]*Claims),
+		claims:  make(map[string]*Claims),
+		pubKeys: cfg.PublicKeys,
+		issuer:  cfg.Issuer,
 	}
 
 	hooks := &server.Hooks{}
@@ -130,7 +152,7 @@ func New(cfg Config) (*Server, error) {
 
 	s.http = &http.Server{
 		Addr:    cfg.Addr,
-		Handler: jwtMiddleware(cfg.PublicKeys, cfg.Issuer, cfg.InsecureSkipVerification, sseSrv),
+		Handler: s.jwtMiddlewareHandler(cfg.InsecureSkipVerification, sseSrv),
 	}
 
 	return s, nil
@@ -166,12 +188,12 @@ func (s *Server) Close(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
 }
 
-// jwtMiddleware validates ?token= on /sse requests and rejects with 401 on
-// failure. When skipVerification is true the JWT signature is not checked --
+// jwtMiddlewareHandler returns an HTTP handler that validates ?token= on /sse
+// requests. When skipVerification is true the JWT signature is not checked --
 // Claims are still parsed from the token payload and remain dynamic per-session.
-// Requests to other paths (e.g. /message) pass through; their Claims were
-// recorded at connection time in the Server's claims map.
-func jwtMiddleware(pubKeys jwk.Set, issuer string, skipVerification bool, next http.Handler) http.Handler {
+// Reads public keys from s.getPublicKeys() so ReloadPublicKeys takes effect
+// on the next connection without a restart.
+func (s *Server) jwtMiddlewareHandler(skipVerification bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/sse" {
 			raw := r.URL.Query().Get("token")
@@ -186,7 +208,7 @@ func jwtMiddleware(pubKeys jwk.Set, issuer string, skipVerification bool, next h
 			if skipVerification {
 				c, err = ParseInsecure(raw)
 			} else {
-				c, err = Parse(pubKeys, issuer, raw)
+				c, err = Parse(s.getPublicKeys(), s.issuer, raw)
 			}
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)

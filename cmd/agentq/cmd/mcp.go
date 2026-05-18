@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -31,15 +33,64 @@ that mints tokens (typically the AgentQ worker).`,
 	RunE: runMCPServe,
 }
 
+var mcpKeygenCmd = &cobra.Command{
+	Use:   "keygen",
+	Short: "Generate an MCP signing key pair",
+	Long: `Generate a signing key pair for MCP session JWTs.
+
+Writes two files:
+  private.jwk   private key for the AgentQ worker (--key-file flag), mode 0600
+  public.jwks   public key set for the MCP server (--jwks-file flag)
+
+The --algorithm flag controls the key type:
+  ES256  ECDSA P-256 (default, recommended)
+  RS256  RSA 2048 (for environments that require RSA)`,
+	RunE: runMCPKeygen,
+}
+
 func init() {
 	rootCmd.AddCommand(mcpCmd)
 	mcpCmd.AddCommand(mcpServeCmd)
+	mcpCmd.AddCommand(mcpKeygenCmd)
 
 	mcpServeCmd.Flags().String("addr", ":8081", "TCP listen address")
 	mcpServeCmd.Flags().String("jwks-file", "", "Path to JWKS JSON file containing token verification keys")
 	mcpServeCmd.Flags().String("issuer", "agentq", "Expected iss claim in session tokens")
 	mcpServeCmd.Flags().Bool("insecure-skip-verification", false, "Skip JWT signature verification. Claims are still parsed and dynamic per-session. Never use in production.")
 	mcpServeCmd.Flags().Bool("dev-tools", false, "Enable development-only tools (e.g. echo). Never use in production.")
+
+	mcpKeygenCmd.Flags().String("out-dir", ".", "Directory to write private.jwk and public.jwks")
+	mcpKeygenCmd.Flags().String("algorithm", "ES256", "Signing algorithm: ES256 (ECDSA P-256, default) or RS256 (RSA 2048)")
+}
+
+func runMCPKeygen(cmd *cobra.Command, _ []string) error {
+	outDir, _ := cmd.Flags().GetString("out-dir")
+	algStr, _ := cmd.Flags().GetString("algorithm")
+
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+
+	alg := mcp.Algorithm(algStr)
+	kp, err := mcp.GenerateKeyPair(alg)
+	if err != nil {
+		return fmt.Errorf("generate key pair: %w", err)
+	}
+
+	privPath := filepath.Join(outDir, "private.jwk")
+	pubPath := filepath.Join(outDir, "public.jwks")
+
+	if err := mcp.WritePrivateKey(privPath, kp); err != nil {
+		return err
+	}
+	if err := mcp.WritePublicKeySet(pubPath, kp); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "generated %s key pair:\n", algStr)
+	fmt.Fprintf(os.Stderr, "  private key: %s  (keep secret; use with --key-file)\n", privPath)
+	fmt.Fprintf(os.Stderr, "  public keys: %s  (share with MCP server; use with --jwks-file)\n", pubPath)
+	return nil
 }
 
 func runMCPServe(cmd *cobra.Command, _ []string) error {
@@ -77,6 +128,29 @@ func runMCPServe(cmd *cobra.Command, _ []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	// SIGHUP reloads the public key set from --jwks-file (no-op in insecure mode).
+	jwksFile, _ := cmd.Flags().GetString("jwks-file")
+	if !skipVerification && jwksFile != "" {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGHUP)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-sigs:
+					set, err := loadJWKSFile(jwksFile)
+					if err != nil {
+						log.Printf("mcp serve: key reload failed: %v", err)
+					} else {
+						srv.ReloadPublicKeys(set)
+						log.Printf("mcp serve: public keys reloaded from %s", jwksFile)
+					}
+				}
+			}
+		}()
+	}
 
 	fmt.Fprintf(os.Stderr, "agentq mcp serve: listening on %s\n", addr)
 	return srv.Start(ctx)

@@ -90,12 +90,14 @@ func fakeRunnerServer(t *testing.T, output string) (*httptest.Server, <-chan run
 	return ts, requests
 }
 
-// newFakeTask wraps a Payload into an entroq.Task for tests.
-func newFakeTask(t *testing.T, sessionURI string, payload Payload) *entroq.Task {
+// newFakeTask wraps a Payload into an entroq.Task and returns both the
+// entroq task and the models.Task, mirroring what the entroq worker framework
+// provides to ProcessTask after pre-unmarshaling.
+func newFakeTask(t *testing.T, sessionURI string, payload Payload) (*entroq.Task, models.Task) {
 	t.Helper()
 	appTask := models.NewTask("agentq/coder/inbox", sessionURI, map[string]any{
-		"messages":     payload.Messages,
-		"workdir":      payload.Workdir,
+		"messages":      payload.Messages,
+		"workdir":       payload.Workdir,
 		"blocked_tools": payload.BlockedTools,
 	})
 	value, err := json.Marshal(appTask)
@@ -106,7 +108,7 @@ func newFakeTask(t *testing.T, sessionURI string, payload Payload) *entroq.Task 
 		ID:    "test-task-1",
 		Queue: "agentq/coder/inbox",
 		Value: value,
-	}
+	}, *appTask
 }
 
 // -- ExpandTools --------------------------------------------------------------
@@ -230,11 +232,11 @@ func TestRemarshal_RoundTrip(t *testing.T) {
 func TestProcessTask_MissingMessages(t *testing.T) {
 	ts, _ := fakeRunnerServer(t, "irrelevant")
 	w := New(testConfig(t, ts.URL))
-	task := newFakeTask(t, "doc:sessions/abc", Payload{
+	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
 		Messages: nil,
 	})
-	_, err := w.ProcessTask(context.Background(), task)
+	_, err := w.ProcessTask(context.Background(), task, appTask)
 	if err == nil {
 		t.Error("expected error for missing messages")
 	}
@@ -247,11 +249,11 @@ func TestProcessTask_RunnerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	w := New(testConfig(t, ts.URL))
-	task := newFakeTask(t, "doc:sessions/abc", Payload{
+	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
 		Messages: []runner.Message{{Role: "user", Content: "go"}},
 	})
-	_, err := w.ProcessTask(context.Background(), task)
+	_, err := w.ProcessTask(context.Background(), task, appTask)
 	if err == nil {
 		t.Error("expected error when runner returns 500")
 	}
@@ -272,7 +274,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 	w := New(cfg)
 
 	sessionURI := "doc:sessions/test-session"
-	task := newFakeTask(t, sessionURI, Payload{
+	task, appTask := newFakeTask(t, sessionURI, Payload{
 		Workdir: "/var/sessions/test-session",
 		Messages: []runner.Message{
 			{Role: "system", Content: "You are a coder."},
@@ -281,7 +283,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 		BlockedTools: []string{"write_file"},
 	})
 
-	args, err := w.ProcessTask(context.Background(), task)
+	args, err := w.ProcessTask(context.Background(), task, appTask)
 	if err != nil {
 		t.Fatalf("ProcessTask: %v", err)
 	}
@@ -367,7 +369,11 @@ func TestWorkerIntegration_QueueRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	modArgs, err := w.ProcessTask(ctx, claimed)
+	var claimedAppTask models.Task
+	if err := json.Unmarshal(claimed.Value, &claimedAppTask); err != nil {
+		t.Fatalf("unmarshal claimed: %v", err)
+	}
+	modArgs, err := w.ProcessTask(ctx, claimed, claimedAppTask)
 	if err != nil {
 		t.Fatalf("ProcessTask: %v", err)
 	}

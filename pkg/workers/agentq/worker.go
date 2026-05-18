@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -69,25 +70,40 @@ type Payload struct {
 type Worker struct {
 	cfg    Config
 	client *http.Client
+
+	keyMu   sync.RWMutex
+	privKey jwk.Key // guarded by keyMu; use getPrivKey / ReloadKey
 }
 
 // New creates a Worker from cfg.
 func New(cfg Config) *Worker {
-	return &Worker{cfg: cfg, client: &http.Client{}}
+	return &Worker{cfg: cfg, client: &http.Client{}, privKey: cfg.PrivKey}
 }
 
-// ProcessTask is called by the task loop for each claimed task. It:
-//  1. Unmarshals the task payload.
+// ReloadKey atomically replaces the signing key. Safe to call from a signal
+// handler goroutine while ProcessTask is running. Intended for SIGHUP-triggered
+// key rotation when using --key-file with Vault Agent or similar.
+func (w *Worker) ReloadKey(key jwk.Key) {
+	w.keyMu.Lock()
+	w.privKey = key
+	w.keyMu.Unlock()
+}
+
+func (w *Worker) getPrivKey() jwk.Key {
+	w.keyMu.RLock()
+	defer w.keyMu.RUnlock()
+	return w.privKey
+}
+
+// ProcessTask is called by the task loop for each claimed task. The entroq
+// worker framework pre-unmarshals task.Value into appTask before calling here.
+// It:
+//  1. Extracts the typed Payload from appTask.
 //  2. Computes effective tools: Config.Tools minus Payload.BlockedTools.
 //  3. Mints an MCP session JWT with those tools and the workdir.
 //  4. Calls the runner via HTTP.
 //  5. Returns EntroQ modifications: insert result task + delete claimed task.
-func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.ModifyArg, error) {
-	var appTask models.Task
-	if err := json.Unmarshal(task.Value, &appTask); err != nil {
-		return nil, fmt.Errorf("agentq %s: unmarshal task: %w", w.cfg.Name, err)
-	}
-
+func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask models.Task) ([]entroq.ModifyArg, error) {
 	var payload Payload
 	if err := remarshal(appTask.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("agentq %s: unmarshal payload: %w", w.cfg.Name, err)
@@ -98,7 +114,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task) ([]entroq.M
 
 	effectiveTools := applyBlocks(applyAllowed(w.cfg.Tools, payload.AllowedTools), payload.BlockedTools)
 
-	jwt, err := mcp.Mint(w.cfg.PrivKey, mcp.Claims{
+	jwt, err := mcp.Mint(w.getPrivKey(), mcp.Claims{
 		Issuer:        w.cfg.Issuer,
 		SessionID:     appTask.SessionURI,
 		Workdir:       payload.Workdir,

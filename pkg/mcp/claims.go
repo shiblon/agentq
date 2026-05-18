@@ -72,7 +72,13 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		return "", fmt.Errorf("mcp: build token: %w", err)
 	}
 
-	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256, privKey))
+	// Read the signing algorithm from the key's metadata so Mint works
+	// with any key type (ES256, RS256, etc.) without hardcoding the algorithm.
+	sigAlg, ok := privKey.Algorithm().(jwa.SignatureAlgorithm)
+	if !ok {
+		return "", fmt.Errorf("mcp: key has no signing algorithm set")
+	}
+	signed, err := jwt.Sign(tok, jwt.WithKey(sigAlg, privKey))
 	if err != nil {
 		return "", fmt.Errorf("mcp: sign token: %w", err)
 	}

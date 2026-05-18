@@ -38,7 +38,7 @@ func TestJWTMiddleware_ValidToken_PassesThrough(t *testing.T) {
 	}
 
 	capture := &handlerCapture{}
-	handler := jwtMiddleware(pubSet, "agentq", false, capture)
+	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
 	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
 	w := httptest.NewRecorder()
@@ -61,7 +61,7 @@ func TestJWTMiddleware_ValidToken_PassesThrough(t *testing.T) {
 func TestJWTMiddleware_MissingToken_Returns401(t *testing.T) {
 	_, pubSet := testKeyPair(t)
 	capture := &handlerCapture{}
-	handler := jwtMiddleware(pubSet, "agentq", false, capture)
+	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
 	r := httptest.NewRequest(http.MethodGet, "/sse", nil)
 	w := httptest.NewRecorder()
@@ -90,7 +90,7 @@ func TestJWTMiddleware_ExpiredToken_Returns401(t *testing.T) {
 	}
 
 	capture := &handlerCapture{}
-	handler := jwtMiddleware(pubSet, "agentq", false, capture)
+	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
 	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
 	w := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 	}
 
 	capture := &handlerCapture{}
-	handler := jwtMiddleware(pubSet, "agentq", false, capture)
+	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
 	r := httptest.NewRequest(http.MethodGet, "/sse?token="+tok, nil)
 	w := httptest.NewRecorder()
@@ -132,7 +132,7 @@ func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 func TestJWTMiddleware_NonSSEPath_PassesWithoutToken(t *testing.T) {
 	_, pubSet := testKeyPair(t)
 	capture := &handlerCapture{}
-	handler := jwtMiddleware(pubSet, "agentq", false, capture)
+	handler := (&Server{pubKeys: pubSet, issuer: "agentq"}).jwtMiddlewareHandler(false, capture)
 
 	// /message requests carry ?sessionId=, not ?token=; they should pass through.
 	r := httptest.NewRequest(http.MethodPost, "/message?sessionId=abc", nil)
