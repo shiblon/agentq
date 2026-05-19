@@ -2,7 +2,7 @@
 # scripts/dev.sh -- start agentq services for local development.
 #
 # Starts:
-#   agentq serve  (in-memory EntroQ gRPC server, localhost:37706)
+#   eqmem serve   (in-memory EntroQ gRPC server, localhost:37706)
 #   agentq api    (REST API + web UI, localhost:8080)
 #   npm run dev   (Vite dev server with /api proxy, localhost:5173)
 #
@@ -49,7 +49,7 @@ fi
 
 # Start EntroQ in-memory queue server.
 echo "Starting queue server on $EQ_ADDR..."
-"$REPO_ROOT/agentq" serve --journal "" >"$REPO_ROOT/.eq.log" 2>&1 &
+go run github.com/shiblon/entroq/cmd/eqmem@v1.0.1 serve >"$REPO_ROOT/.eq.log" 2>&1 &
 pids+=($!)
 
 # Wait for the queue server to be ready.

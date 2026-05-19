@@ -145,7 +145,7 @@ queue name, run an instance watching that queue.
 
 ## The eq server
 
-The default server is `agentq serve`, which embeds an in-memory entroq gRPC server
-(`eqmem`) with optional journal persistence. The journal replays on restart, so
-state survives process restarts. For production, the postgres-backed entroq server
-(`eqpg`) provides durability without journal size concerns.
+The queue server is `ghcr.io/shiblon/entroq-mem`, the published eqmem image from
+the entroq project. It supports optional journal persistence; the journal replays
+on restart so state survives process restarts. For production, the postgres-backed
+entroq server (`eqpg`) provides durability without journal size concerns.

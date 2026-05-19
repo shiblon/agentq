@@ -49,11 +49,6 @@ type Config struct {
 	// If nil, orchestration tools are not registered.
 	EQ *entroq.EntroQ
 
-	// SupervisorQueue is this MCP server's supervisor inbox. Set as reply_to
-	// on tasks created by dispatch_to_agent so leaf agents know where to return
-	// results. Only used when EQ is set.
-	SupervisorQueue string
-
 	// QueueNamespace is the prefix for agent queue names, e.g. "agentq".
 	// dispatch_to_agent constructs queues as <namespace>/<agent>/inbox.
 	// Defaults to "agentq" when EQ is set.
@@ -121,7 +116,7 @@ func New(cfg Config) (*Server, error) {
 		if ns == "" {
 			ns = "agentq"
 		}
-		tools = append(tools, AllOrchestrationTools(cfg.EQ, cfg.SupervisorQueue, ns)...)
+		tools = append(tools, AllOrchestrationTools(cfg.EQ, ns)...)
 	}
 	mcpSrv.AddTools(tools...)
 

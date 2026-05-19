@@ -1,157 +1,103 @@
 # Long
 
-## pending-work
-## Pending work before manual test (2026-05-18)
+## agent-tool-set-design
+Tool ceiling model (settled):
+- Each agent type has a configured tool ceiling (from agents.yaml tools: field)
+- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load (ExpandTools)
+- tools: [] or absent = fail closed, zero tools permitted
+- Task payload carries optional allowed_tools and blocked_tools lists; Supervisor can narrow for a specific task
+- AgentQ computes: intersect(configured_tools, allowed_tools) - blocked_tools -> JWT ToolAllowlist
+- Workdir comes from task payload (per-session, set by Supervisor)
 
-**Immediate (blocks manual test):**
-
-1. Add ReplyTo to mcp.Claims -- dispatch_to_agent reads reply_to from JWT claims instead of static server config.
-   - Add ReplyTo string to mcp.Claims (claim key: mcp_reply_to)
-   - Supervisor mints JWT with ReplyTo = its own inbox queue
-   - dispatch_to_agent reads c.ReplyTo from claims instead of supervisorQueue param
-   - AllOrchestrationTools signature drops supervisorQueue param
-   - mcp.Config drops SupervisorQueue field
-
-2. Add --eq-addr to agentq mcp serve -- wire openEQ into runMCPServe, populate cfg.EQ.
-   - Only --eq-addr needed (no --supervisor-queue since that moves to JWT)
-   - Keep --queue-namespace (default agentq)
-
-**Already done:**
-- pkg/mcp: Streamable HTTP, JWT allowlist, all tool sets, dispatch_to_agent
-- pkg/runner: claude CLI runner microservice  
-- pkg/workers/agentq: leaf agent worker
-- pkg/workers/supervisor: supervisor worker (replaces old LLM-routing supervisor)
-- agentq submit: one-shot prompt CLI
-- Old pkg/workers/supervisor (LLM routing) deleted
-- models.UserReplyQueue: deterministic reply queue from session ID
-
-**Later:**
-- Different runner types (API-based, non-claude CLI)
-- MCP behind eqlink (deferred, see mcp-eqlink-option)
-- Compact mode: supervisor LLM summarization of inherited artifacts (stub exists in session meta)
-
-## system-architecture
-## System architecture (updated 2026-05-18)
-
-Four components, all in cmd/agentq:
-
-**MCP server** (pkg/mcp, agentq mcp serve :8081)
-- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
-- Tools: file, git, go, search tools + dispatch_to_agent (when started with EQ)
-- dispatch_to_agent inserts tasks into agent queues; reply_to comes from JWT ReplyTo claim (NOT server config)
-- Key: agentq mcp serve --jwks-file / --insecure-skip-verification
-- EQ flags: --eq-addr (enables dispatch_to_agent), --queue-namespace (default: agentq)
-- NOTE: --eq-addr flag not yet added to CLI; pending
-
-**Runner** (pkg/runner, agentq runner serve :8082)
-- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
-- Writes --mcp-config tempfile, invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
-- Config: --command (default: claude), --args (default: --print), --mcp-addr
-
-**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
-- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner, posts result to task.ReplyTo
-- Reads runner_url and mcp_addr from agents.yaml
-- Key: --key-file / --insecure-no-keys
-
-**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
-- Claims from agentq/supervisor/inbox (single queue: user prompts + agent replies)
-- User prompt task: payload.messages present
-- Agent reply task: payload.from_agent + payload.output present
-- Loads session, loads saved transcript from supervisor_transcript artifact, builds transcript, mints JWT with dispatch_to_agent, calls runner, saves updated transcript, posts output to models.UserReplyQueue(sessionID)
-- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools (default: dispatch_to_agent)
-
-**Submit CLI** (agentq submit)
-- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}], blocks on models.UserReplyQueue(sessionID), prints output
-
-**Reply queue** (models.UserReplyQueue)
-- Deterministic: agentq/sessions/<id>/reply
-- No stored field in session; derived from session ID by both submit and supervisor
+agents.yaml per-agent fields: runner_url, mcp_addr, tools (list or ["*"])
 
 ## runner-types
-## Runner extensibility (noted 2026-05-18)
-
-Current runner (pkg/runner) is claude-CLI-specific: hardcodes --mcp-config, --input-format stream-json, --output-format stream-json, --verbose. Future runner types will be needed:
+Current runner (pkg/runner) is claude-CLI-specific. Future types will be needed:
 - API-based (Claude API, OpenAI, Gemini) -- no subprocess, no stream-json
-- Different CLI tools (other agentic CLIs)
-- Possibly language-specific runners (Python SDK, etc.)
+- Different CLI tools
+- Language-specific runners (Python SDK, etc.)
 
-The runner interface is already well-defined (RunRequest / RunResponse over HTTP), so adding new runner implementations is straightforward. The AgentQ worker and supervisor just POST to a URL -- they don't care what's behind it.
-
-Don't abstract prematurely. Keep the current claude runner as-is; add new runner packages when a second one is actually needed.
+The interface (RunRequest/RunResponse over HTTP) is already well-defined. Workers just POST to a URL and don't care what's behind it. Don't abstract prematurely -- add new runner packages when a second one is actually needed.
 
 ## mcp-eqlink-option
-## MCP behind eqlink -- future option (noted 2026-05-18)
+MCP behind eqlink -- future option (noted 2026-05-18, not worth doing now).
 
-With Streamable HTTP transport, Runner→MCP is pure request-response when
-WithDisableStreaming(true) is set. This makes it compatible with eqlink,
-which would make ALL inter-service communication queue-mediated.
+With Streamable HTTP + WithDisableStreaming(true), Runner->MCP is pure request-response, compatible with eqlink. Would make ALL inter-service communication queue-mediated: uniform backpressure, audit logging, one operational model.
 
-Upside: uniform backpressure, audit logging, scaling across the whole mesh
-(AgentQ→Runner AND Runner→MCP), one operational model throughout.
+Downside: MCP tool calls are low-latency (agent blocks waiting); queue round-trip adds latency for every file read, git status, etc. Any MCP server-push features (progress, sampling) would break.
 
-Downside: MCP tool calls are low-latency (agent is blocked waiting); queue
-round-trip adds latency for every git status, file read, etc.
-
-Caveat: any MCP server-push features (progress notifications, sampling
-requests) would break through eqlink since eqlink rejects SSE/WebSocket.
-Requires WithDisableStreaming(true) on the MCP server.
-
-Not worth doing now. Revisit if MCP becomes a scaling bottleneck or if
-uniform queue-mediation becomes a priority for the audit story.
+Revisit if MCP becomes a scaling bottleneck or uniform queue-mediation becomes a priority for audit.
 
 ## mcp-transport
-## MCP transport: Streamable HTTP (settled 2026-05-18)
+Streamable HTTP (settled 2026-05-18). Switched from SSE.
 
-Switched from SSE to Streamable HTTP (NewStreamableHTTPServer).
+Session JWT in X-AgentQ-Session-Config header (not ?token= query param).
+Named deliberately: it is configuration, not authentication. Authorization: Bearer rejected -- implies auth semantics.
 
-Session JWT moves from ?token= query param to X-AgentQ-Session-Config header.
-Named deliberately: it is configuration, not authentication. Authorization: Bearer
-was rejected because it implies auth semantics.
+Server is stateless: WithHTTPContextFunc fires per-request; no claims store, no session ID generator, no unregister hooks. Every request carries its own JWT and is validated uniformly.
 
-Server is stateless: WithHTTPContextFunc fires per-request, so no claims store,
-no session ID generator, no unregister hooks. Every request carries its own JWT.
-
-All paths require X-AgentQ-Session-Config. Previous SSE design had path-based
-routing (/sse validated, /message trusted the store); now every request is
-validated uniformly.
-
-Runner --mcp-config format: type:'http', url: base URL /mcp endpoint,
-headers: {'X-AgentQ-Session-Config': jwt}.
-
+Runner --mcp-config format: type:'http', url: base URL, headers: {'X-AgentQ-Session-Config': jwt}
 Client: mcpclient.NewStreamableHttpClient(url, transport.WithHTTPHeaders(headers))
 
 ## mcp-jwt-trust-model
-## MCP JWT trust model (settled 2026-05-18)
+Three-party model: Supervisor vouches, AgentQ/Supervisor Worker issues, MCP verifies.
 
-Three-party model: Supervisor vouches, AgentQ issues, MCP verifies.
+**Supervisor**: vouches -- expresses intent (messages, workdir, tool bans). Never holds a signing key.
+**AgentQ/Supervisor Worker**: issues -- holds private signing key, mints JWT encoding intent intersected with configured tool ceiling. Only component with issuance capability.
+**MCP server**: verifies -- holds only public JWKS. Validates JWTs, extracts Claims (tools, workdir), enforces them. Cannot mint.
 
-**Supervisor**: vouches -- expresses what an agent may do for a specific task
-(messages, workdir, optional tool bans). Never holds a signing key.
+Key storage: Vault or similar in production; SIGHUP rotation supported.
+Dev: local key file or ephemeral generated key (--insecure-no-keys); --insecure-skip-verification on MCP bypasses entirely.
 
-**AgentQ**: issues -- holds the private signing key, mints the MCP config JWT
-encoding the Supervisor's intent intersected with the agent type's configured
-tool ceiling. The only component with issuance capability.
+## pending-work
+## Pending before manual test (confirmed 2026-05-18, still open)
 
-**MCP server**: verifies -- holds only the public JWKS. Validates JWTs,
-extracts Claims (tools, workdir), enforces them. Cannot mint.
+**1. ReplyTo in JWT claims instead of server config**
+- dispatch_to_agent currently reads supervisorQueue from AllOrchestrationTools() param and mcp.Config.SupervisorQueue
+- Should move to: supervisor mints JWT with ReplyTo claim; dispatch_to_agent reads c.ReplyTo from claims
+- Changes: add ReplyTo to mcp.Claims; drop SupervisorQueue from mcp.Config and AllOrchestrationTools signature
 
-**Key storage**: Vault or similar in production. AgentQ fetches at startup,
-supports SIGHUP rotation (same pattern as NewTokenExchangerFromFiles).
-Dev path: local key file or ephemeral generated key; --insecure-skip-verification
-on MCP server bypasses validation entirely.
+**2. Wire --eq-addr into agentq mcp serve**
+- runMCPServe never calls openEQ; cfg.EQ is never set; dispatch_to_agent never registered
+- Fix: call openEQ(ctx) in runMCPServe when --eq-addr is set; populate cfg.EQ, cfg.SupervisorQueue, cfg.QueueNamespace
 
-## Agent type → tool set design
+**Later:**
+- Different runner types (API-based Claude API, OpenAI, Gemini)
+- MCP behind eqlink (deferred -- see mcp-eqlink-option)
+- Compact mode supervisor LLM summarization (stub exists in session meta)
 
-- Each agent type has a configured tool ceiling (from agents.yaml).
-- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load.
-- tools: [] or absent = fail closed, zero tools permitted.
-- Task payload carries optional banned_tools list; Supervisor can narrow the
-  ceiling for a specific task. Absent = no bans.
-- AgentQ computes: (configured_tools - banned_tools) → JWT ToolAllowlist.
-- Workdir comes from the task payload (per-session, set by Supervisor).
+## system-architecture
+Four components in cmd/agentq:
 
-## agents.yaml additions
-Each agent entry gains: runner_url, mcp_addr, tools (list or ["*"]).
+**MCP server** (pkg/mcp, agentq mcp serve :8081)
+- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
+- Tools: file, git, go, search, shell + dispatch_to_agent (when EQ wired -- PENDING)
+- Key: --jwks-file / --insecure-skip-verification; SIGHUP reloads
+- dispatch_to_agent uses supervisorQueue from server config (not JWT claim -- see pending-work)
+
+**Runner** (pkg/runner, agentq runner serve :8082)
+- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
+- Writes --mcp-config tempfile; invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
+- Config: --command (default: claude), --args (default: --print), --mcp-addr
+
+**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
+- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner
+- Posts result to task.ReplyTo if set, else cfg.ReplyQueue (default: agentq/supervisor/inbox)
+- Key: --key-file / --insecure-no-keys
+
+**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
+- Claims from agentq/supervisor/inbox (user prompts AND agent replies on same queue)
+- User prompt: payload.messages present; agent reply: payload.from_agent + payload.output
+- Builds transcript from supervisor_transcript artifact, mints JWT with dispatch_to_agent, calls runner
+- Saves updated transcript, posts output to models.UserReplyQueue(sessionID)
+- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools
+
+**Submit CLI** (agentq submit --prompt)
+- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}]
+- Blocks on models.UserReplyQueue(sessionID), prints output
+
+**Reply queue** (models.UserReplyQueue)
+- Deterministic: agentq/sessions/<id>/reply -- derived from session ID, never stored
 
 ## workspace-file-sharing
 Design decided: Gitea for VCS, MinIO for large/binary files.
@@ -1014,4 +960,144 @@ The application code is identical with or without eqlink. This means:
 JWT flow: Supervisor mints JWT → includes in task payload → AgentQ claims task
 → forwards JWT in HTTP POST to Runner → Runner puts ?token=<jwt> in MCP SSE URL.
 AgentQ never mints; it just forwards what it received.
+
+## Pending work before manual test (2026-05-18)
+**Immediate (blocks manual test):**
+
+1. Add ReplyTo to mcp.Claims -- dispatch_to_agent reads reply_to from JWT claims instead of static server config.
+   - Add ReplyTo string to mcp.Claims (claim key: mcp_reply_to)
+   - Supervisor mints JWT with ReplyTo = its own inbox queue
+   - dispatch_to_agent reads c.ReplyTo from claims instead of supervisorQueue param
+   - AllOrchestrationTools signature drops supervisorQueue param
+   - mcp.Config drops SupervisorQueue field
+
+2. Add --eq-addr to agentq mcp serve -- wire openEQ into runMCPServe, populate cfg.EQ.
+   - Only --eq-addr needed (no --supervisor-queue since that moves to JWT)
+   - Keep --queue-namespace (default agentq)
+
+**Already done:**
+- pkg/mcp: Streamable HTTP, JWT allowlist, all tool sets, dispatch_to_agent
+- pkg/runner: claude CLI runner microservice  
+- pkg/workers/agentq: leaf agent worker
+- pkg/workers/supervisor: supervisor worker (replaces old LLM-routing supervisor)
+- agentq submit: one-shot prompt CLI
+- Old pkg/workers/supervisor (LLM routing) deleted
+- models.UserReplyQueue: deterministic reply queue from session ID
+
+**Later:**
+- Different runner types (API-based, non-claude CLI)
+- MCP behind eqlink (deferred, see mcp-eqlink-option)
+- Compact mode: supervisor LLM summarization of inherited artifacts (stub exists in session meta)
+
+## System architecture (updated 2026-05-18)
+Four components, all in cmd/agentq:
+
+**MCP server** (pkg/mcp, agentq mcp serve :8081)
+- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
+- Tools: file, git, go, search tools + dispatch_to_agent (when started with EQ)
+- dispatch_to_agent inserts tasks into agent queues; reply_to comes from JWT ReplyTo claim (NOT server config)
+- Key: agentq mcp serve --jwks-file / --insecure-skip-verification
+- EQ flags: --eq-addr (enables dispatch_to_agent), --queue-namespace (default: agentq)
+- NOTE: --eq-addr flag not yet added to CLI; pending
+
+**Runner** (pkg/runner, agentq runner serve :8082)
+- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
+- Writes --mcp-config tempfile, invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
+- Config: --command (default: claude), --args (default: --print), --mcp-addr
+
+**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
+- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner, posts result to task.ReplyTo
+- Reads runner_url and mcp_addr from agents.yaml
+- Key: --key-file / --insecure-no-keys
+
+**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
+- Claims from agentq/supervisor/inbox (single queue: user prompts + agent replies)
+- User prompt task: payload.messages present
+- Agent reply task: payload.from_agent + payload.output present
+- Loads session, loads saved transcript from supervisor_transcript artifact, builds transcript, mints JWT with dispatch_to_agent, calls runner, saves updated transcript, posts output to models.UserReplyQueue(sessionID)
+- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools (default: dispatch_to_agent)
+
+**Submit CLI** (agentq submit)
+- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}], blocks on models.UserReplyQueue(sessionID), prints output
+
+**Reply queue** (models.UserReplyQueue)
+- Deterministic: agentq/sessions/<id>/reply
+- No stored field in session; derived from session ID by both submit and supervisor
+
+## Runner extensibility (noted 2026-05-18)
+Current runner (pkg/runner) is claude-CLI-specific: hardcodes --mcp-config, --input-format stream-json, --output-format stream-json, --verbose. Future runner types will be needed:
+- API-based (Claude API, OpenAI, Gemini) -- no subprocess, no stream-json
+- Different CLI tools (other agentic CLIs)
+- Possibly language-specific runners (Python SDK, etc.)
+
+The runner interface is already well-defined (RunRequest / RunResponse over HTTP), so adding new runner implementations is straightforward. The AgentQ worker and supervisor just POST to a URL -- they don't care what's behind it.
+
+Don't abstract prematurely. Keep the current claude runner as-is; add new runner packages when a second one is actually needed.
+
+## MCP behind eqlink -- future option (noted 2026-05-18)
+With Streamable HTTP transport, Runner→MCP is pure request-response when
+WithDisableStreaming(true) is set. This makes it compatible with eqlink,
+which would make ALL inter-service communication queue-mediated.
+
+Upside: uniform backpressure, audit logging, scaling across the whole mesh
+(AgentQ→Runner AND Runner→MCP), one operational model throughout.
+
+Downside: MCP tool calls are low-latency (agent is blocked waiting); queue
+round-trip adds latency for every git status, file read, etc.
+
+Caveat: any MCP server-push features (progress notifications, sampling
+requests) would break through eqlink since eqlink rejects SSE/WebSocket.
+Requires WithDisableStreaming(true) on the MCP server.
+
+Not worth doing now. Revisit if MCP becomes a scaling bottleneck or if
+uniform queue-mediation becomes a priority for the audit story.
+
+## MCP transport: Streamable HTTP (settled 2026-05-18)
+Switched from SSE to Streamable HTTP (NewStreamableHTTPServer).
+
+Session JWT moves from ?token= query param to X-AgentQ-Session-Config header.
+Named deliberately: it is configuration, not authentication. Authorization: Bearer
+was rejected because it implies auth semantics.
+
+Server is stateless: WithHTTPContextFunc fires per-request, so no claims store,
+no session ID generator, no unregister hooks. Every request carries its own JWT.
+
+All paths require X-AgentQ-Session-Config. Previous SSE design had path-based
+routing (/sse validated, /message trusted the store); now every request is
+validated uniformly.
+
+Runner --mcp-config format: type:'http', url: base URL /mcp endpoint,
+headers: {'X-AgentQ-Session-Config': jwt}.
+
+Client: mcpclient.NewStreamableHttpClient(url, transport.WithHTTPHeaders(headers))
+
+## MCP JWT trust model (settled 2026-05-18)
+Three-party model: Supervisor vouches, AgentQ issues, MCP verifies.
+
+**Supervisor**: vouches -- expresses what an agent may do for a specific task
+(messages, workdir, optional tool bans). Never holds a signing key.
+
+**AgentQ**: issues -- holds the private signing key, mints the MCP config JWT
+encoding the Supervisor's intent intersected with the agent type's configured
+tool ceiling. The only component with issuance capability.
+
+**MCP server**: verifies -- holds only the public JWKS. Validates JWTs,
+extracts Claims (tools, workdir), enforces them. Cannot mint.
+
+**Key storage**: Vault or similar in production. AgentQ fetches at startup,
+supports SIGHUP rotation (same pattern as NewTokenExchangerFromFiles).
+Dev path: local key file or ephemeral generated key; --insecure-skip-verification
+on MCP server bypasses validation entirely.
+
+## Agent type → tool set design
+- Each agent type has a configured tool ceiling (from agents.yaml).
+- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load.
+- tools: [] or absent = fail closed, zero tools permitted.
+- Task payload carries optional banned_tools list; Supervisor can narrow the
+  ceiling for a specific task. Absent = no bans.
+- AgentQ computes: (configured_tools - banned_tools) → JWT ToolAllowlist.
+- Workdir comes from the task payload (per-session, set by Supervisor).
+
+## agents.yaml additions
+Each agent entry gains: runner_url, mcp_addr, tools (list or ["*"]).
 

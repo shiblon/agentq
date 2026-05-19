@@ -14,6 +14,7 @@ const (
 	claimWorkdir  = "mcp_workdir"
 	claimTools    = "mcp_tools"
 	claimBranches = "mcp_branches"
+	claimReplyTo  = "mcp_reply_to"
 
 	defaultTokenTTL = time.Hour
 )
@@ -47,6 +48,12 @@ type Claims struct {
 	// ToolConfig map[string]any when a second tool needs its own config.
 	AllowedBranches []string
 
+	// ReplyTo is the EntroQ queue where dispatch_to_agent should route agent
+	// results. Typically the supervisor's own inbox. Required in any JWT that
+	// grants dispatch_to_agent; absent or empty means dispatch_to_agent will
+	// reject the call. Optional in all other contexts.
+	ReplyTo string
+
 	// Expiry is when this token becomes invalid.
 	// If zero when passed to Mint, a default TTL of one hour is used.
 	Expiry time.Time
@@ -60,14 +67,17 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		expiry = time.Now().Add(defaultTokenTTL)
 	}
 
-	tok, err := jwt.NewBuilder().
+	b := jwt.NewBuilder().
 		Issuer(c.Issuer).
 		Expiration(expiry).
 		Claim(claimSession, c.SessionID).
 		Claim(claimWorkdir, c.Workdir).
 		Claim(claimTools, c.ToolAllowlist).
-		Claim(claimBranches, c.AllowedBranches).
-		Build()
+		Claim(claimBranches, c.AllowedBranches)
+	if c.ReplyTo != "" {
+		b = b.Claim(claimReplyTo, c.ReplyTo)
+	}
+	tok, err := b.Build()
 	if err != nil {
 		return "", fmt.Errorf("mcp: build token: %w", err)
 	}
@@ -147,12 +157,16 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 		}
 	}
 
+	// ReplyTo is optional; absent means empty string.
+	replyTo, _ := private[claimReplyTo].(string)
+
 	return &Claims{
 		Issuer:          tok.Issuer(),
 		SessionID:       sessionID,
 		Workdir:         workdir,
 		ToolAllowlist:   tools,
 		AllowedBranches: branches,
+		ReplyTo:         replyTo,
 		Expiry:          tok.Expiration(),
 	}, nil
 }

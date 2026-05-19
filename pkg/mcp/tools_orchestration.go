@@ -12,17 +12,17 @@ import (
 )
 
 // AllOrchestrationTools returns the supervisor orchestration tools, backed by eq.
-// supervisorQueue is the supervisor's own inbox -- set as reply_to on dispatched
-// tasks so leaf agents know where to return results.
 // namespace is the queue name prefix (e.g. "agentq"); agent queues are
 // constructed as <namespace>/<agent>/inbox.
-func AllOrchestrationTools(eq *entroq.EntroQ, supervisorQueue, namespace string) []server.ServerTool {
+// The reply_to address for dispatched tasks is read from the JWT ReplyTo claim,
+// so each supervisor instance declares its own inbox without server-side config.
+func AllOrchestrationTools(eq *entroq.EntroQ, namespace string) []server.ServerTool {
 	return []server.ServerTool{
-		dispatchToAgentTool(eq, supervisorQueue, namespace),
+		dispatchToAgentTool(eq, namespace),
 	}
 }
 
-func dispatchToAgentTool(eq *entroq.EntroQ, supervisorQueue, namespace string) server.ServerTool {
+func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool {
 	def := mcplib.NewTool("dispatch_to_agent",
 		mcplib.WithDescription(
 			"Dispatch a task to a named leaf agent. Fire-and-forget: returns immediately "+
@@ -76,6 +76,10 @@ func dispatchToAgentTool(eq *entroq.EntroQ, supervisorQueue, namespace string) s
 			}
 
 			targetQueue := fmt.Sprintf("%s/%s/inbox", namespace, agentName)
+			if c.ReplyTo == "" {
+				return mcplib.NewToolResultError("JWT missing mcp_reply_to claim; supervisor must mint JWT with ReplyTo set"), nil
+			}
+
 			sessionURI := "doc:sessions/" + c.SessionID
 
 			task := models.NewTask(targetQueue, sessionURI,
@@ -83,7 +87,7 @@ func dispatchToAgentTool(eq *entroq.EntroQ, supervisorQueue, namespace string) s
 					"workdir":  workdir,
 					"messages": messages,
 				},
-				models.WithReplyTo(supervisorQueue),
+				models.WithReplyTo(c.ReplyTo),
 			)
 
 			if _, err := eq.Modify(ctx, entroq.InsertingInto(targetQueue, entroq.WithValue(task))); err != nil {

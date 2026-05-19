@@ -189,7 +189,7 @@ go build -o agentq ./cmd/agentq
 ### 1. Start the queue server
 
 ```bash
-./agentq serve                         # in-memory queue on :37706
+docker run --rm -p 37706:37706 ghcr.io/shiblon/entroq-mem:v1.0.1 serve
 ```
 
 ### 2. Generate signing keys

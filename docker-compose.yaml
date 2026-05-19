@@ -1,200 +1,129 @@
-version: "3.9"
+# AgentQ development stack.
+#
+# Claude credentials (pick one):
+#   1. claude login (default): docker compose up, then authenticate once:
+#        docker compose exec runner claude
+#      Follow the login prompt. Credentials persist in the 'claude-credentials' volume.
+#   2. API key:                ANTHROPIC_API_KEY=sk-ant-... docker compose up
+#
+# Submit a prompt once the stack is running (uses your local binary):
+#   agentq submit --prompt "Write a hello-world in Go"
+#
+# Add more agent workers by duplicating the worker-coder service block.
 
-# Build context is the parent dir so the local entroq replace directive resolves.
-x-build: &build
-  build:
-    context: ..
-    dockerfile: agentq/Dockerfile
-
-x-agent: &agent
-  <<: *build
-  depends_on:
-    - eq
-  environment:
-    AGENTQ_EQ_ADDR: eq:37706
-    AGENTQ_LLM_ADDR: http://ollama:11434
+x-eq-env: &eq-env
+  AGENTQ_EQ_ADDR: queue:37706
 
 services:
-  opa:
-    image: openpolicyagent/opa:latest
-    command:
-      - run
-      - --server
-      - --addr=:8181
-      - --log-format=json
-      # Core entroq authz policy (queue/namespace matching logic)
-      - /policy/core
-      # Provider policy (OIDC user + permissions implementation)
-      - /policy/providers
-      # Site-specific data (IDP config + user/queue permission matrix)
-      - /data
-    ports:
-      - "8181:8181"
-    depends_on:
-      zitadel:
-        condition: service_healthy
-    volumes:
-      - ../entroq/pkg/authz/opadata/conf/core:/policy/core:ro
-      - ../entroq/pkg/authz/opadata/conf/providers:/policy/providers:ro
-      - ./config/entroq-policy:/data:ro
 
-  eq:
-    <<: *build
-    command:
-      - serve
-      - --port=37706
-      - --http-port=9100
-      - --authz-url=http://opa:8181
+  # ── EntroQ: durable task queue ──────────────────────────────────────────────
+  queue:
+    image: ghcr.io/shiblon/entroq-mem:v1.0.1
+    command: [serve]
     ports:
       - "37706:37706"
-      - "9100:9100"
-    depends_on:
-      - opa
-    volumes:
-      - eq-journal:/data/agentq/journal
+    expose:
+      - "9100"
+    restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ${OLLAMA_MODELS:-/tmp/agentq-ollama-models}:/root/.ollama
-
-  # HTTP API server. JWT issuer must match what Zitadel puts in tokens, which
-  # is the *external* URL (http://localhost:8080), not the container-internal
-  # one. The JWKS endpoint is fetched internally via the container network.
-  api:
-    <<: *build
+  # ── MCP server: JWT-gated tool pool ─────────────────────────────────────────
+  mcp:
+    build: .
     command:
-      - api
-      - --eq-addr=eq:37706
-      - --addr=:8090
-      - --jwks-url=http://zitadel:8080/oauth/v2/keys
-      - --issuer=http://localhost:8080
+      - mcp
+      - serve
+      - --insecure-skip-verification
+      - --dev-tools
     environment:
-      AGENTQ_EQ_TOKEN: ${API_EQ_TOKEN:-}
-      AGENTQ_PROVENANCE_KEY: ${PROVENANCE_KEY:-}
-    ports:
-      - "8090:8090"
+      <<: *eq-env
+    volumes:
+      - workspace:/workspace
     depends_on:
-      eq:
-        condition: service_started
-      zitadel:
-        condition: service_healthy
-    environment:
-      AGENTQ_EQ_ADDR: eq:37706
+      - queue
+    restart: unless-stopped
 
+  # ── Runner: HTTP microservice that execs claude CLI ──────────────────────────
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    command:
+      - runner
+      - serve
+      - --mcp-addr=http://mcp:8081
+    volumes:
+      - claude-credentials:/root/.claude
+      - workspace:/workspace
+    environment:
+      # Set ANTHROPIC_API_KEY if you use an API key instead of claude login.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      - mcp
+    restart: unless-stopped
+
+  # ── Supervisor: orchestration brain ─────────────────────────────────────────
   supervisor:
-    <<: *agent
+    build: .
     command:
-      - run
-      - --agent=supervisor
-      - --eq-addr=eq:37706
-      - --token-url=http://zitadel:8080/oauth/v2/token
+      - supervisor
+      - serve
+      - --insecure-no-keys
+      - --runner-url=http://runner:8082
+      - --mcp-addr=http://mcp:8081
+      - --default-workdir=/workspace
+    environment:
+      <<: *eq-env
+    volumes:
+      - workspace:/workspace
     depends_on:
-      eq:
-        condition: service_started
-      zitadel:
-        condition: service_healthy
-    environment:
-      AGENTQ_EQ_ADDR: eq:37706
-      AGENTQ_LLM_ADDR: http://ollama:11434
-      # Populated by deploy/zitadel-bootstrap.sh output.
-      AGENTQ_CLIENT_ID: ${SUPERVISOR_CLIENT_ID:-}
-      AGENTQ_CLIENT_SECRET: ${SUPERVISOR_CLIENT_SECRET:-}
-      AGENTQ_EQ_TOKEN: ${SUPERVISOR_EQ_TOKEN:-}
-      AGENTQ_PROVENANCE_KEY: ${PROVENANCE_KEY:-}
-      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
+      - queue
+      - runner
+      - mcp
+    restart: unless-stopped
 
-  coder:
-    <<: *agent
-    command: ["run", "--agent=coder", "--eq-addr=eq:37706"]
+  # ── AgentQ worker: coder ─────────────────────────────────────────────────────
+  worker-coder:
+    build: .
+    command:
+      - worker
+      - serve
+      - --agent=coder
+      - --insecure-no-keys
     environment:
-      AGENTQ_EQ_ADDR: eq:37706
-      AGENTQ_EQ_TOKEN: ${CODER_EQ_TOKEN:-}
-      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
+      <<: *eq-env
+      AGENTQ_CONFIG: /config/agents.yaml
+    volumes:
+      - ./config/agents.compose.yaml:/config/agents.yaml:ro
+      - workspace:/workspace
+    depends_on:
+      - queue
+      - runner
+      - mcp
+    restart: unless-stopped
 
-  reviewer:
-    <<: *agent
-    command: ["run", "--agent=reviewer", "--eq-addr=eq:37706"]
-    environment:
-      AGENTQ_EQ_ADDR: eq:37706
-      AGENTQ_EQ_TOKEN: ${REVIEWER_EQ_TOKEN:-}
-      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
-
-  researcher:
-    <<: *agent
-    command: ["run", "--agent=researcher", "--eq-addr=eq:37706"]
-    environment:
-      AGENTQ_EQ_ADDR: eq:37706
-      AGENTQ_EQ_TOKEN: ${RESEARCHER_EQ_TOKEN:-}
-      AGENTQ_APPROVAL_KEY: ${APPROVAL_KEY:-}
-
+  # ── Prometheus: scrapes queue metrics ───────────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
     volumes:
-      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml
+      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
     depends_on:
-      - eq
+      - queue
+    restart: unless-stopped
 
+  # ── Grafana: queue dashboard ─────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     ports:
       - "3000:3000"
     volumes:
-      - ../entroq/deploy/grafana/provisioning:/etc/grafana/provisioning
-      - ../entroq/deploy/grafana/entroq-dashboard.json:/var/lib/grafana/dashboards/entroq-dashboard.json
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/entroq-dashboard.json:/var/lib/grafana/dashboards/entroq-dashboard.json:ro
     depends_on:
       - prometheus
-
-  gitea:
-    image: gitea/gitea:latest
-    environment:
-      - USER_UID=1000
-      - USER_GID=1000
-    ports:
-      - "3001:3000"   # Gitea web UI
-      - "2222:22"     # Gitea SSH
-    volumes:
-      - gitea-data:/data
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: agentq
-      MINIO_ROOT_PASSWORD: agentqsecret
-    ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # MinIO console
-    volumes:
-      - minio-data:/data
-
-  zitadel:
-    image: ghcr.io/zitadel/zitadel:latest
-    command: start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled
-    environment:
-      ZITADEL_DATABASE_SQLITE_HOST: /data/zitadel.db
-      ZITADEL_EXTERNALSECURE: "false"
-      ZITADEL_EXTERNALPORT: "8080"
-      ZITADEL_EXTERNALDOMAIN: localhost
-      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
-      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: "Password1!"
-    ports:
-      - "8080:8080"
-    volumes:
-      - zitadel-data:/data
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/debug/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
+    restart: unless-stopped
 
 volumes:
-  eq-journal:
-  gitea-data:
-  minio-data:
-  zitadel-data:
+  claude-credentials:
+  workspace:

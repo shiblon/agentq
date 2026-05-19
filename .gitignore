@@ -8,6 +8,7 @@ QUBIT.md
 .claude
 /agentq
 /echoagent
+/eqc
 
 # engram database
 .claude/engram.db

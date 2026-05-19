@@ -94,7 +94,7 @@ are not here or in the user's answers.
 All agentq services use the same published image. The role is determined by the command:
 
 ```
-agentq serve --port=<port>      # eq server
+docker run ghcr.io/shiblon/entroq-mem:v1.0.1 serve --port=<port>  # eq server
 agentq run --agent=<name>       # built-in worker (supervisor, or mock agents)
 agentq exec --agent=<name> \
   --queue=<queue> \

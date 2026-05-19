@@ -92,7 +92,9 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	output, err := r.run(req.Context(), task)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("run: %v", err), http.StatusInternalServerError)
+		msg := fmt.Sprintf("run: %v", err)
+		fmt.Fprintln(os.Stderr, "runner error:", msg)
+		http.Error(w, msg, http.StatusInternalServerError)
 		return
 	}
 

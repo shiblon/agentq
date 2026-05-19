@@ -58,7 +58,6 @@ func init() {
 	mcpServeCmd.Flags().String("issuer", "agentq", "Expected iss claim in session tokens")
 	mcpServeCmd.Flags().Bool("insecure-skip-verification", false, "Skip JWT signature verification. Claims are still parsed and dynamic per-session. Never use in production.")
 	mcpServeCmd.Flags().Bool("dev-tools", false, "Enable development-only tools (e.g. echo). Never use in production.")
-	mcpServeCmd.Flags().String("supervisor-queue", "agentq/supervisor/inbox", "Supervisor inbox queue; set as reply_to on dispatch_to_agent tasks. Required when --eq-addr is set.")
 	mcpServeCmd.Flags().String("queue-namespace", "agentq", "Prefix for agent queue names (dispatch_to_agent constructs <namespace>/<agent>/inbox). Only used when --eq-addr is set.")
 
 	mcpKeygenCmd.Flags().String("out-dir", ".", "Directory to write private.jwk and public.jwks")
@@ -96,6 +95,9 @@ func runMCPKeygen(cmd *cobra.Command, _ []string) error {
 }
 
 func runMCPServe(cmd *cobra.Command, _ []string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
 	addr, _ := cmd.Flags().GetString("addr")
 	cfg := mcp.Config{Addr: addr}
 
@@ -123,13 +125,22 @@ func runMCPServe(cmd *cobra.Command, _ []string) error {
 		cfg.Issuer = issuer
 	}
 
+	// Wire dispatch_to_agent when --eq-addr was explicitly provided.
+	if cmd.Root().PersistentFlags().Changed("eq-addr") {
+		eq, err := openEQ(ctx)
+		if err != nil {
+			return fmt.Errorf("connect to entroq: %w", err)
+		}
+		defer eq.Close()
+		cfg.EQ = eq
+		cfg.QueueNamespace, _ = cmd.Flags().GetString("queue-namespace")
+		log.Printf("mcp serve: orchestration tools enabled (namespace=%s)", cfg.QueueNamespace)
+	}
+
 	srv, err := mcp.New(cfg)
 	if err != nil {
 		return fmt.Errorf("create mcp server: %w", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	// SIGHUP reloads the public key set from --jwks-file (no-op in insecure mode).
 	jwksFile, _ := cmd.Flags().GetString("jwks-file")

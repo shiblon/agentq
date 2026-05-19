@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/shiblon/agentq/pkg/runner"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/entroq"
+	"github.com/shiblon/entroq/pkg/worker"
 )
 
 const transcriptArtifactType = "supervisor_transcript"
@@ -89,12 +91,12 @@ func (w *Worker) getPrivKey() jwk.Key {
 func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask models.Task) ([]entroq.ModifyArg, error) {
 	session, err := w.store.GetSessionByURI(ctx, appTask.SessionURI)
 	if err != nil {
-		return nil, fmt.Errorf("supervisor: load session %s: %w", appTask.SessionURI, err)
+		return nil, worker.MoveErrorf("supervisor: load session %s: %v", appTask.SessionURI, err)
 	}
 
 	transcript, err := w.buildTranscript(session, appTask.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("supervisor: build transcript: %w", err)
+		return nil, worker.MoveErrorf("supervisor: build transcript: %v", err)
 	}
 
 	workdir := session.Meta.WorkspaceRepo
@@ -102,15 +104,17 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		workdir = w.cfg.DefaultWorkdir
 	}
 
+	supervisorQueue := task.Queue
 	jwt, err := mcp.Mint(w.getPrivKey(), mcp.Claims{
 		Issuer:        w.cfg.Issuer,
 		SessionID:     appTask.SessionURI,
 		Workdir:       workdir,
 		ToolAllowlist: w.cfg.Tools,
+		ReplyTo:       supervisorQueue,
 		Expiry:        time.Now().Add(2 * time.Hour),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("supervisor: mint jwt: %w", err)
+		return nil, worker.MoveErrorf("supervisor: mint jwt: %v", err)
 	}
 
 	output, err := w.callRunner(ctx, runner.RunRequest{
@@ -118,13 +122,13 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		Messages: transcript,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("supervisor: runner: %w", err)
+		return nil, worker.RetryErrorf("supervisor: runner: %v", err)
 	}
 
 	// Persist transcript + assistant response for the next round.
 	updated := append(transcript, runner.Message{Role: "assistant", Content: output})
 	if err := w.saveTranscript(ctx, session, updated); err != nil {
-		return nil, fmt.Errorf("supervisor: save transcript: %w", err)
+		return nil, worker.RetryErrorf("supervisor: save transcript: %v", err)
 	}
 
 	replyQueue := models.UserReplyQueue(session.ID)
@@ -231,7 +235,8 @@ func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("runner returned %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("runner returned %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
 
 	var result runner.RunResponse

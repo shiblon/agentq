@@ -1,0 +1,37 @@
+# agents.compose.yaml -- agent config for docker compose.
+# URLs use docker service names instead of localhost.
+# Mounted into worker containers as /config/agents.yaml.
+
+rubric: |
+  Auto-approve: reading files, searching, running tests, web lookups.
+  Escalate to human review only when an action is truly irreversible
+  (e.g. a production deployment that requires external confirmation).
+  Reject: deleting files without explicit user instruction, commands
+  with destructive flags (--force, --hard-reset, DROP TABLE, etc.).
+
+agents:
+  - name: coder
+    queue: agentq/coder/inbox
+    description: Writes, reads, and edits source code to implement a task.
+    runner_url: http://runner:8082
+    mcp_addr: http://mcp:8081
+    tools:
+      - "*"
+
+  - name: reviewer
+    queue: agentq/reviewer/inbox
+    description: Reviews code for correctness, style, and tests.
+    runner_url: http://runner:8082
+    mcp_addr: http://mcp:8081
+    tools:
+      - read_file
+      - list_directory
+
+  - name: researcher
+    queue: agentq/researcher/inbox
+    description: Researches questions using web search and documentation lookup.
+    runner_url: http://runner:8082
+    mcp_addr: http://mcp:8081
+    tools:
+      - read_file
+      - list_directory
