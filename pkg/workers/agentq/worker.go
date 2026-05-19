@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,9 @@ import (
 type Config struct {
 	// Name is the agent identifier, e.g. "coder".
 	Name string
+
+	// Description is the agent's role, injected as part of the system prompt.
+	Description string
 
 	// Tools is the ceiling of MCP tools this agent may use, already expanded
 	// (no wildcards). Use ExpandTools to resolve ["*"] before constructing Config.
@@ -126,8 +130,9 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	}
 
 	output, err := w.callRunner(ctx, runner.RunRequest{
-		JWT:      jwt,
-		Messages: payload.Messages,
+		JWT:          jwt,
+		Messages:     payload.Messages,
+		SystemPrompt: buildSystemPrompt(w.cfg.Name, w.cfg.Description, effectiveTools),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: runner: %w", w.cfg.Name, err)
@@ -176,6 +181,26 @@ func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string,
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	return result.Output, nil
+}
+
+// buildSystemPrompt constructs the agent system prompt from its identity and tool list.
+func buildSystemPrompt(name, description string, tools []string) string {
+	var sb strings.Builder
+	sb.WriteString("You are the ")
+	sb.WriteString(name)
+	sb.WriteString(" agent.")
+	if description != "" {
+		sb.WriteString(" Your job: ")
+		sb.WriteString(description)
+	}
+	if len(tools) > 0 {
+		sb.WriteString("\n\nAvailable MCP tools: ")
+		sb.WriteString(strings.Join(tools, ", "))
+		sb.WriteString(".\nUse only these tools. Do not use any other tools.")
+	} else {
+		sb.WriteString("\n\nYou have no MCP tools available. Respond using only your own knowledge.")
+	}
+	return sb.String()
 }
 
 // applyAllowed narrows tools to the intersection with allowed.

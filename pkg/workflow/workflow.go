@@ -23,10 +23,11 @@ type SubmitResult struct {
 type SubmitRequest struct {
 	UserID           string
 	Prompt           string
-	ContinueFrom     string // parent session ID; if set, artifacts are inherited
-	Repo             string // e.g. "github.com/shiblon/agentq"; stored as workspace_repo
-	HumanToken       string // raw bearer token; stored for delegated agent token exchange
-	Compact          bool   // hint to supervisor to summarize inherited context
+	Messages         []models.Message // if set, used as transcript instead of wrapping Prompt
+	ContinueFrom     string           // parent session ID; if set, artifacts are inherited
+	Repo             string           // e.g. "github.com/shiblon/agentq"; stored as workspace_repo
+	HumanToken       string           // raw bearer token; stored for delegated agent token exchange
+	Compact          bool             // hint to supervisor to summarize inherited context
 	ProvenanceIssuer *approval.ProvenanceIssuer // if set, mints a provenance token for this session
 	// SupervisorQueue is the EntroQ queue to enqueue the supervisor task on.
 	// Defaults to "agentq/supervisor/inbox" if empty.
@@ -91,10 +92,12 @@ func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, req 
 	}
 
 	sessionURI := store.SessionURI(session.ID)
+	messages := req.Messages
+	if messages == nil {
+		messages = []models.Message{{Role: "user", Content: req.Prompt}}
+	}
 	payload := map[string]any{
-		"messages": []map[string]any{
-			{"role": "user", "content": req.Prompt},
-		},
+		"messages": messages,
 	}
 	if session.Meta.ProvenanceToken != "" {
 		payload["provenance_token"] = session.Meta.ProvenanceToken
@@ -107,4 +110,18 @@ func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, req 
 
 	log.Printf("workflow: submitted session %s -> %s", session.ID, sessionURI)
 	return &SubmitResult{SessionID: session.ID, SessionURI: sessionURI}, nil
+}
+
+// SubmitFollowUp enqueues a follow-up user message for an existing session.
+// The supervisor loads its saved transcript and appends the new message.
+func SubmitFollowUp(ctx context.Context, eq *entroq.EntroQ, sessionID, text, supervisorQueue string) error {
+	if supervisorQueue == "" {
+		supervisorQueue = "agentq/supervisor/inbox"
+	}
+	sessionURI := store.SessionURI(sessionID)
+	task := models.NewTask(supervisorQueue, sessionURI, map[string]any{
+		"follow_up": text,
+	})
+	_, err := eq.Modify(ctx, entroq.InsertingInto(supervisorQueue, entroq.WithValue(task)))
+	return err
 }

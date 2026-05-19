@@ -80,7 +80,7 @@ func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool 
 				return mcplib.NewToolResultError("JWT missing mcp_reply_to claim; supervisor must mint JWT with ReplyTo set"), nil
 			}
 
-			sessionURI := "doc:sessions/" + c.SessionID
+			sessionURI := c.SessionID
 
 			task := models.NewTask(targetQueue, sessionURI,
 				map[string]any{

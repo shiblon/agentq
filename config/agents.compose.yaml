@@ -10,6 +10,14 @@ rubric: |
   with destructive flags (--force, --hard-reset, DROP TABLE, etc.).
 
 agents:
+  - name: echo
+    queue: agentq/echo/inbox
+    description: Echoes back the user's message verbatim. Use for testing dispatch.
+    runner_url: http://runner:8082
+    mcp_addr: http://mcp:8081
+    tools:
+      - echo
+
   - name: coder
     queue: agentq/coder/inbox
     description: Writes, reads, and edits source code to implement a task.

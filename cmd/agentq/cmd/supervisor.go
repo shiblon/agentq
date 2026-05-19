@@ -9,12 +9,14 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/mcp"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/workers/supervisor"
 	"github.com/shiblon/entroq"
 	eqworker "github.com/shiblon/entroq/pkg/worker"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var supervisorCmd = &cobra.Command{
@@ -49,6 +51,8 @@ func init() {
 	supervisorServeCmd.Flags().String("mcp-addr", "", "Base URL of the MCP pool server (must have dispatch_to_agent registered)")
 	supervisorServeCmd.Flags().String("tools", "dispatch_to_agent", "Comma-separated list of MCP tools the supervisor may use")
 	supervisorServeCmd.Flags().String("default-workdir", "", "Fallback workdir when session has no workspace configured")
+	supervisorServeCmd.Flags().String("prompt", "", "System prompt for the supervisor (overrides built-in default)")
+	supervisorServeCmd.Flags().String("prompt-file", "", "Path to a file containing the supervisor system prompt")
 
 	_ = supervisorServeCmd.MarkFlagRequired("runner-url")
 	_ = supervisorServeCmd.MarkFlagRequired("mcp-addr")
@@ -63,6 +67,16 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 	mcpAddr, _ := cmd.Flags().GetString("mcp-addr")
 	toolsStr, _ := cmd.Flags().GetString("tools")
 	defaultWorkdir, _ := cmd.Flags().GetString("default-workdir")
+	prompt, _ := cmd.Flags().GetString("prompt")
+	promptFile, _ := cmd.Flags().GetString("prompt-file")
+
+	if promptFile != "" {
+		b, err := os.ReadFile(promptFile)
+		if err != nil {
+			return fmt.Errorf("read prompt file: %w", err)
+		}
+		prompt = string(b)
+	}
 
 	if keyFile == "" && !noKeys {
 		return fmt.Errorf("one of --key-file or --insecure-no-keys is required")
@@ -98,6 +112,16 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 
 	log.Printf("supervisor: claiming from %q, runner=%s, mcp=%s, tools=%v", queue, runnerURL, mcpAddr, tools)
 
+	// Load agent roster and build system prompt.
+	agentCfg, err := config.Load(viper.GetString("config"))
+	if err != nil {
+		log.Printf("supervisor: could not load agent config: %v (continuing without agent roster)", err)
+	}
+	var agentInfos []supervisor.AgentInfo
+	for _, a := range agentCfg.Agents {
+		agentInfos = append(agentInfos, supervisor.AgentInfo{Name: a.Name, Description: a.Description})
+	}
+
 	workerCfg := supervisor.Config{
 		Issuer:         issuer,
 		PrivKey:        kp.Private,
@@ -105,6 +129,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		RunnerURL:      runnerURL,
 		Tools:          tools,
 		DefaultWorkdir: defaultWorkdir,
+		SystemPrompt:   supervisor.BuildSystemPrompt(prompt, agentInfos),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

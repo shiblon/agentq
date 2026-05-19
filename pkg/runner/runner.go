@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+
+	"github.com/shiblon/agentq/pkg/models"
 )
 
 // Config holds the static configuration set at startup.
@@ -42,16 +44,8 @@ func New(cfg Config) *Runner {
 	return &Runner{cfg: cfg}
 }
 
-// Message is one turn in the conversation transcript.
-type Message struct {
-	// Role is "system", "user", or "assistant".
-	Role    string `json:"role"`
-	Content string `json:"content"`
-
-	// Provenance -- optional, for tracing which agent/step produced this message.
-	Agent string `json:"agent,omitempty"`
-	Step  int    `json:"step,omitempty"`
-}
+// Message is an alias for models.Message for backward compatibility within this package.
+type Message = models.Message
 
 // RunRequest is the JSON body the runner accepts.
 type RunRequest struct {
@@ -63,6 +57,10 @@ type RunRequest struct {
 	// component (Supervisor / AgentQ). The runner serialises it to the
 	// claude stream-json input format.
 	Messages []Message `json:"messages"`
+
+	// SystemPrompt, if non-empty, is passed as --system-prompt to the agent
+	// command. Use this to inject the agent's persona and tool awareness.
+	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
 // RunResponse is the JSON body returned on success.
@@ -119,8 +117,11 @@ func (r *Runner) run(ctx context.Context, task RunRequest) (string, error) {
 	// are required for structured I/O with the claude CLI.
 	// NOTE: --verbose is currently required by claude when combining
 	// --print with --output-format stream-json. Revisit if that changes.
-	args := make([]string, len(r.cfg.Args), len(r.cfg.Args)+6)
+	args := make([]string, len(r.cfg.Args), len(r.cfg.Args)+8)
 	copy(args, r.cfg.Args)
+	if task.SystemPrompt != "" {
+		args = append(args, "--system-prompt", task.SystemPrompt)
+	}
 	args = append(args,
 		"--mcp-config", cfgFile,
 		"--input-format", "stream-json",
@@ -181,6 +182,7 @@ func parseResult(output []byte) (string, error) {
 		IsError bool   `json:"is_error"`
 	}
 
+	var last *resultEvent
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -189,17 +191,21 @@ func parseResult(output []byte) (string, error) {
 		}
 		var ev resultEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
-			continue // skip unparseable lines
+			continue
 		}
 		if ev.Type != "result" {
 			continue
 		}
-		if ev.Subtype != "success" || ev.IsError {
-			return "", fmt.Errorf("agent returned error result (subtype=%q)", ev.Subtype)
-		}
-		return ev.Result, nil
+		copy := ev
+		last = &copy
 	}
-	return "", fmt.Errorf("no result event found in agent output")
+	if last == nil {
+		return "", fmt.Errorf("no result event found in agent output")
+	}
+	if last.Subtype != "success" || last.IsError {
+		return "", fmt.Errorf("agent returned error result (subtype=%q)", last.Subtype)
+	}
+	return last.Result, nil
 }
 
 // mcpConfigFile is the JSON structure written for --mcp-config.

@@ -51,6 +51,9 @@ services:
       - runner
       - serve
       - --mcp-addr=http://mcp:8081
+      - --args=--print
+      - --args=--allowedTools
+      - --args=mcp__agentq__*
     volumes:
       - claude-credentials:/root/.claude
       - workspace:/workspace
@@ -88,6 +91,26 @@ services:
       - worker
       - serve
       - --agent=coder
+      - --insecure-no-keys
+    environment:
+      <<: *eq-env
+      AGENTQ_CONFIG: /config/agents.yaml
+    volumes:
+      - ./config/agents.compose.yaml:/config/agents.yaml:ro
+      - workspace:/workspace
+    depends_on:
+      - queue
+      - runner
+      - mcp
+    restart: unless-stopped
+
+  # ── AgentQ worker: echo ──────────────────────────────────────────────────────
+  worker-echo:
+    build: .
+    command:
+      - worker
+      - serve
+      - --agent=echo
       - --insecure-no-keys
     environment:
       <<: *eq-env

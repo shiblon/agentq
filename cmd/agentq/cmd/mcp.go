@@ -125,17 +125,15 @@ func runMCPServe(cmd *cobra.Command, _ []string) error {
 		cfg.Issuer = issuer
 	}
 
-	// Wire dispatch_to_agent when --eq-addr was explicitly provided.
-	if cmd.Root().PersistentFlags().Changed("eq-addr") {
-		eq, err := openEQ(ctx)
-		if err != nil {
-			return fmt.Errorf("connect to entroq: %w", err)
-		}
-		defer eq.Close()
-		cfg.EQ = eq
-		cfg.QueueNamespace, _ = cmd.Flags().GetString("queue-namespace")
-		log.Printf("mcp serve: orchestration tools enabled (namespace=%s)", cfg.QueueNamespace)
+	// Wire dispatch_to_agent via the eq connection (flag or AGENTQ_EQ_ADDR env var).
+	eq, err := openEQ(ctx)
+	if err != nil {
+		return fmt.Errorf("connect to entroq: %w", err)
 	}
+	defer eq.Close()
+	cfg.EQ = eq
+	cfg.QueueNamespace, _ = cmd.Flags().GetString("queue-namespace")
+	log.Printf("mcp serve: orchestration tools enabled (namespace=%s)", cfg.QueueNamespace)
 
 	srv, err := mcp.New(cfg)
 	if err != nil {

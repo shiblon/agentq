@@ -103,13 +103,14 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	log.Printf("worker %s: claiming from %q, %d tools, runner=%s", agentName, agent.Queue, len(tools), agent.RunnerURL)
 
 	workerCfg := agentqworker.Config{
-		Name:       agentName,
-		Tools:      tools,
-		PrivKey:    kp.Private,
-		Issuer:     issuer,
-		MCPAddr:    agent.MCPAddr,
-		RunnerURL:  agent.RunnerURL,
-		ReplyQueue: replyQueue,
+		Name:        agentName,
+		Description: agent.Description,
+		Tools:       tools,
+		PrivKey:     kp.Private,
+		Issuer:      issuer,
+		MCPAddr:     agent.MCPAddr,
+		RunnerURL:   agent.RunnerURL,
+		ReplyQueue:  replyQueue,
 	}
 	w := agentqworker.New(workerCfg)
 

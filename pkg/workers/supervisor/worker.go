@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,41 @@ type Config struct {
 	// DefaultWorkdir is the filesystem path used when the session has no
 	// workspace configured (Meta.WorkspaceRepo is empty).
 	DefaultWorkdir string
+
+	// SystemPrompt is prepended to every transcript as a system message.
+	// If empty, DefaultSystemPrompt is used.
+	SystemPrompt string
+}
+
+// DefaultSystemPrompt is the base orchestrator prompt. BuildSystemPrompt appends the agent roster.
+const DefaultSystemPrompt = `You are an AI orchestrator. Your job is to understand the user's request and delegate work to specialist agents using the dispatch_to_agent tool. Do not attempt to do the work yourself. Break complex requests into subtasks and dispatch each one. Synthesize the results into a final response for the user.`
+
+// AgentInfo describes a known specialist agent for the system prompt.
+type AgentInfo struct {
+	Name        string
+	Description string
+}
+
+// BuildSystemPrompt constructs the full system prompt from a base and an agent roster.
+// If base is empty, DefaultSystemPrompt is used.
+func BuildSystemPrompt(base string, agents []AgentInfo) string {
+	if base == "" {
+		base = DefaultSystemPrompt
+	}
+	if len(agents) == 0 {
+		return base
+	}
+	var sb strings.Builder
+	sb.WriteString(base)
+	sb.WriteString("\n\nAvailable agents:\n")
+	for _, a := range agents {
+		sb.WriteString("  - ")
+		sb.WriteString(a.Name)
+		sb.WriteString(": ")
+		sb.WriteString(a.Description)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
 }
 
 // Worker claims tasks from the supervisor inbox and calls the runner.
@@ -149,7 +185,25 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 //   - "messages" in payload: user-initiated turn; use those messages directly.
 //   - "from_agent" in payload: leaf agent reply; load saved transcript and
 //     append the agent result as a user message.
+func (w *Worker) systemPrompt() string {
+	if w.cfg.SystemPrompt != "" {
+		return w.cfg.SystemPrompt
+	}
+	return DefaultSystemPrompt
+}
+
 func (w *Worker) buildTranscript(session *models.Session, payload map[string]any) ([]runner.Message, error) {
+	sys := runner.Message{Role: "system", Content: w.systemPrompt()}
+
+	if text, ok := payload["follow_up"].(string); ok {
+		transcript, err := w.loadTranscript(session)
+		if err != nil {
+			return nil, err
+		}
+		transcript = append(transcript, runner.Message{Role: "user", Content: text})
+		return append([]runner.Message{sys}, transcript...), nil
+	}
+
 	if agentNameRaw, ok := payload["from_agent"]; ok {
 		agentName, _ := agentNameRaw.(string)
 		output, _ := payload["output"].(string)
@@ -163,7 +217,7 @@ func (w *Worker) buildTranscript(session *models.Session, payload map[string]any
 			Content: fmt.Sprintf("[Agent %s completed]\n%s", agentName, output),
 			Agent:   agentName,
 		})
-		return transcript, nil
+		return append([]runner.Message{sys}, transcript...), nil
 	}
 
 	if rawMessages, ok := payload["messages"]; ok {
@@ -175,7 +229,7 @@ func (w *Worker) buildTranscript(session *models.Session, payload map[string]any
 		if err := json.Unmarshal(b, &messages); err != nil {
 			return nil, fmt.Errorf("decode messages: %w", err)
 		}
-		return messages, nil
+		return append([]runner.Message{sys}, messages...), nil
 	}
 
 	return nil, fmt.Errorf("task payload has neither 'messages' nor 'from_agent'")
