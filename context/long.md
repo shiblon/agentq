@@ -2,6 +2,16 @@
 
 # Long
 
+## transcript-structure-problem
+Supervisor transcript stores flat {role, content string} messages but claude's actual conversation includes structured tool_use and tool_result content blocks. When the supervisor replays a transcript after an agent returns (from_agent case), claude sees its prior text output ('Dispatched!') but not the tool call that produced it -- so it dispatches again.
+
+Three options under consideration:
+1. Store structured transcripts -- capture full stream-json tool_use/tool_result blocks, replay them properly. Correct long-term design; requires models.Message to support content blocks.
+2. Synthesis-only for from_agent case -- don't replay history, give claude: 'User asked X, agent Y returned Z, synthesize response.' Loses context but breaks replay loop immediately.
+3. Two-phase supervisor -- dispatch turn is fire-and-forget, synthesis turn starts fresh with summary context.
+
+Next session: choose direction before implementing.
+
 ## supervisor-tool-restriction
 Supervisor sees all Claude Code native tools (Agent, TaskCreate, WebFetch, cron, etc.) instead of only dispatch_to_agent. Need to restrict the supervisor's tool visibility to only its configured MCP tools. The claude CLI likely has an --allowedTools flag that can limit this. Also need to inject available agent roster + descriptions into the system prompt so the supervisor knows what agents exist and what they can do.
 

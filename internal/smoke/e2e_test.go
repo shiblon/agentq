@@ -210,7 +210,7 @@ func TestE2E_AgentQWorkerThroughRunnerToMCP(t *testing.T) {
 		MCPAddr:    mcpTS.URL,
 		RunnerURL:  runnerTS.URL,
 		ReplyQueue: replyQueue,
-	})
+	}, eq)
 
 	// Start the worker loop in the background.
 	workerCtx, cancelWorker := context.WithCancel(ctx)

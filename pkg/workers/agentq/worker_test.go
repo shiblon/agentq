@@ -231,7 +231,7 @@ func TestRemarshal_RoundTrip(t *testing.T) {
 
 func TestProcessTask_MissingMessages(t *testing.T) {
 	ts, _ := fakeRunnerServer(t, "irrelevant")
-	w := New(testConfig(t, ts.URL))
+	w := New(testConfig(t, ts.URL), nil)
 	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
 		Messages: nil,
@@ -248,7 +248,7 @@ func TestProcessTask_RunnerError(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	w := New(testConfig(t, ts.URL))
+	w := New(testConfig(t, ts.URL), nil)
 	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
 		Messages: []runner.Message{{Role: "user", Content: "go"}},
@@ -271,7 +271,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 		RunnerURL:  ts.URL,
 		ReplyQueue: "agentq/supervisor/inbox",
 	}
-	w := New(cfg)
+	w := New(cfg, nil)
 
 	sessionURI := "doc:sessions/test-session"
 	task, appTask := newFakeTask(t, sessionURI, Payload{
@@ -351,7 +351,7 @@ func TestWorkerIntegration_QueueRoundTrip(t *testing.T) {
 		replyQueue = "agentq/supervisor/inbox"
 	)
 
-	w := New(testConfig(t, ts.URL))
+	w := New(testConfig(t, ts.URL), nil)
 
 	appTask := models.NewTask(inbox, "doc:sessions/s1", map[string]any{
 		"workdir":  "/work",

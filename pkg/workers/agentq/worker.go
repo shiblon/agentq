@@ -18,6 +18,7 @@ import (
 	"github.com/shiblon/agentq/pkg/mcp"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/runner"
+	"github.com/shiblon/agentq/pkg/sessionlog"
 	"github.com/shiblon/entroq"
 )
 
@@ -68,11 +69,21 @@ type Payload struct {
 	// BlockedTools removes specific tools from the effective set after
 	// AllowedTools has been applied. Absent means no blocks.
 	BlockedTools []string `json:"blocked_tools,omitempty"`
+
+	// ParentSessionID is the plain session ID (not URI) of the supervisor session
+	// that dispatched this task via dispatch_to_agent. Set by that tool; used by
+	// the worker to write dispatch_complete to the parent's chunk log on completion.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+
+	// ChildSessionID is the ID generated at dispatch time identifying this
+	// subtask in the parent session's pending set and chunk log.
+	ChildSessionID string `json:"child_session_id,omitempty"`
 }
 
 // Worker claims tasks from an EntroQ inbox and dispatches them to the runner.
 type Worker struct {
 	cfg    Config
+	eq     *entroq.EntroQ
 	client *http.Client
 
 	keyMu   sync.RWMutex
@@ -80,8 +91,8 @@ type Worker struct {
 }
 
 // New creates a Worker from cfg.
-func New(cfg Config) *Worker {
-	return &Worker{cfg: cfg, client: &http.Client{}, privKey: cfg.PrivKey}
+func New(cfg Config, eq *entroq.EntroQ) *Worker {
+	return &Worker{cfg: cfg, eq: eq, client: &http.Client{}, privKey: cfg.PrivKey}
 }
 
 // ReloadKey atomically replaces the signing key. Safe to call from a signal
@@ -149,10 +160,30 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		"output":     output,
 	})
 
-	return []entroq.ModifyArg{
+	args := []entroq.ModifyArg{
 		entroq.InsertingInto(replyQueue, entroq.WithValue(resultTask)),
 		task.Delete(),
-	}, nil
+	}
+
+	// If this task was dispatched by a supervisor (parent/child IDs set), write
+	// dispatch_complete to the parent's chunk log and clear the pending entry.
+	if payload.ParentSessionID != "" && payload.ChildSessionID != "" {
+		pendingDoc, err := sessionlog.FindPending(ctx, w.eq, payload.ChildSessionID)
+		if err != nil {
+			return nil, fmt.Errorf("agentq %s: find pending: %w", w.cfg.Name, err)
+		}
+		args = append(args,
+			sessionlog.AppendArg(payload.ParentSessionID, sessionlog.Chunk{
+				Type:    sessionlog.ChunkDispatchComplete,
+				Agent:   w.cfg.Name,
+				ChildID: payload.ChildSessionID,
+				Summary: output,
+			}),
+			entroq.DeletingDoc(pendingDoc),
+		)
+	}
+
+	return args, nil
 }
 
 func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string, error) {

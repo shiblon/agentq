@@ -2,12 +2,16 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/shiblon/agentq/pkg/models"
+	"github.com/shiblon/agentq/pkg/sessionlog"
 	"github.com/shiblon/entroq"
 )
 
@@ -81,20 +85,37 @@ func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool 
 			}
 
 			sessionURI := c.SessionID
+			parentSessionID := strings.TrimPrefix(sessionURI, "doc:sessions/")
+
+			var raw [8]byte
+			if _, err := rand.Read(raw[:]); err != nil {
+				return mcplib.NewToolResultError(fmt.Sprintf("generate child session ID: %v", err)), nil
+			}
+			childSessionID := fmt.Sprintf("%016x", binary.BigEndian.Uint64(raw[:]))
 
 			task := models.NewTask(targetQueue, sessionURI,
 				map[string]any{
-					"workdir":  workdir,
-					"messages": messages,
+					"workdir":           workdir,
+					"messages":          messages,
+					"parent_session_id": parentSessionID,
+					"child_session_id":  childSessionID,
 				},
 				models.WithReplyTo(c.ReplyTo),
 			)
 
-			if _, err := eq.Modify(ctx, entroq.InsertingInto(targetQueue, entroq.WithValue(task))); err != nil {
+			if _, err := eq.Modify(ctx,
+				entroq.InsertingInto(targetQueue, entroq.WithValue(task)),
+				sessionlog.AppendArg(parentSessionID, sessionlog.Chunk{
+					Type:    sessionlog.ChunkDispatchPending,
+					Agent:   agentName,
+					ChildID: childSessionID,
+				}),
+				sessionlog.PendingAddArg(parentSessionID, childSessionID, agentName),
+			); err != nil {
 				return mcplib.NewToolResultError(fmt.Sprintf("dispatch to %s: %v", agentName, err)), nil
 			}
 
-			return mcplib.NewToolResultText(fmt.Sprintf("dispatched to %s (session %s)", agentName, c.SessionID)), nil
+			return mcplib.NewToolResultText(fmt.Sprintf("dispatched to %s (child session: %s)", agentName, childSessionID)), nil
 		}),
 	}
 }

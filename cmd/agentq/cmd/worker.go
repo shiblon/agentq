@@ -102,6 +102,15 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	tools := agentqworker.ExpandTools(agent.Tools)
 	log.Printf("worker %s: claiming from %q, %d tools, runner=%s", agentName, agent.Queue, len(tools), agent.RunnerURL)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	eq, err := openEQ(ctx)
+	if err != nil {
+		return err
+	}
+	defer eq.Close()
+
 	workerCfg := agentqworker.Config{
 		Name:        agentName,
 		Description: agent.Description,
@@ -112,10 +121,7 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 		RunnerURL:   agent.RunnerURL,
 		ReplyQueue:  replyQueue,
 	}
-	w := agentqworker.New(workerCfg)
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
+	w := agentqworker.New(workerCfg, eq)
 
 	// SIGHUP reloads the signing key from --key-file (no-op with --insecure-no-keys).
 	if keyFile != "" {
@@ -138,12 +144,6 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 			}
 		}()
 	}
-
-	eq, err := openEQ(ctx)
-	if err != nil {
-		return err
-	}
-	defer eq.Close()
 
 	log.Printf("worker %s: starting on queue %q", agentName, agent.Queue)
 	return eqworker.New(eq,

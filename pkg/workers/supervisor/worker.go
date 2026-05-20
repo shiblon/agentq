@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,12 +20,11 @@ import (
 	"github.com/shiblon/agentq/pkg/mcp"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/runner"
+	"github.com/shiblon/agentq/pkg/sessionlog"
 	"github.com/shiblon/agentq/pkg/store"
 	"github.com/shiblon/entroq"
 	"github.com/shiblon/entroq/pkg/worker"
 )
-
-const transcriptArtifactType = "supervisor_transcript"
 
 // Config holds the static configuration for the supervisor worker.
 type Config struct {
@@ -56,7 +56,7 @@ type Config struct {
 }
 
 // DefaultSystemPrompt is the base orchestrator prompt. BuildSystemPrompt appends the agent roster.
-const DefaultSystemPrompt = `You are an AI orchestrator. Your job is to understand the user's request and delegate work to specialist agents using the dispatch_to_agent tool. Do not attempt to do the work yourself. Break complex requests into subtasks and dispatch each one. Synthesize the results into a final response for the user.`
+const DefaultSystemPrompt = `You are an AI orchestrator. Your job is to understand the user's request and delegate work to specialist agents using the dispatch_to_agent tool. Do not attempt to do the work yourself. When an agent completes, synthesize its output into a clear response for the user.`
 
 // AgentInfo describes a known specialist agent for the system prompt.
 type AgentInfo struct {
@@ -91,6 +91,7 @@ func BuildSystemPrompt(base string, agents []AgentInfo) string {
 type Worker struct {
 	cfg    Config
 	store  *store.Store
+	eq     *entroq.EntroQ
 	client *http.Client
 
 	keyMu   sync.RWMutex
@@ -102,6 +103,7 @@ func New(cfg Config, eq *entroq.EntroQ) *Worker {
 	return &Worker{
 		cfg:     cfg,
 		store:   store.New(eq),
+		eq:      eq,
 		client:  &http.Client{},
 		privKey: cfg.PrivKey,
 	}
@@ -122,15 +124,22 @@ func (w *Worker) getPrivKey() jwk.Key {
 }
 
 // ProcessTask is called by the eqworker framework for each claimed task.
-// It dispatches to the runner and posts the supervisor's response to the
-// session's UserReplyTo queue.
+// It writes any new user or dispatch-complete chunks to the session log,
+// reads the full transcript from the log, calls the runner, appends the
+// assistant response chunk, and posts the result to the reply queue.
 func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask models.Task) ([]entroq.ModifyArg, error) {
 	session, err := w.store.GetSessionByURI(ctx, appTask.SessionURI)
 	if err != nil {
 		return nil, worker.MoveErrorf("supervisor: load session %s: %v", appTask.SessionURI, err)
 	}
 
-	transcript, err := w.buildTranscript(session, appTask.Payload)
+	sessionID := strings.TrimPrefix(appTask.SessionURI, "doc:sessions/")
+
+	if err := w.writeIncomingChunks(ctx, sessionID, appTask.Payload); err != nil {
+		return nil, worker.MoveErrorf("supervisor: write chunks: %v", err)
+	}
+
+	transcript, err := w.buildTranscript(ctx, sessionID)
 	if err != nil {
 		return nil, worker.MoveErrorf("supervisor: build transcript: %v", err)
 	}
@@ -153,18 +162,16 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		return nil, worker.MoveErrorf("supervisor: mint jwt: %v", err)
 	}
 
+	for i, m := range transcript {
+		log.Printf("supervisor: transcript[%d] role=%s content=%.120s", i, m.Role, m.Content)
+	}
+
 	output, err := w.callRunner(ctx, runner.RunRequest{
 		JWT:      jwt,
 		Messages: transcript,
 	})
 	if err != nil {
 		return nil, worker.RetryErrorf("supervisor: runner: %v", err)
-	}
-
-	// Persist transcript + assistant response for the next round.
-	updated := append(transcript, runner.Message{Role: "assistant", Content: output})
-	if err := w.saveTranscript(ctx, session, updated); err != nil {
-		return nil, worker.RetryErrorf("supervisor: save transcript: %v", err)
 	}
 
 	replyQueue := models.UserReplyQueue(session.ID)
@@ -174,17 +181,15 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	})
 
 	return []entroq.ModifyArg{
+		sessionlog.AppendArg(sessionID, sessionlog.Chunk{
+			Type:    sessionlog.ChunkAssistantMessage,
+			Content: output,
+		}),
 		entroq.InsertingInto(replyQueue, entroq.WithValue(resultTask)),
 		task.Delete(),
 	}, nil
 }
 
-// buildTranscript constructs the message slice to pass to the runner.
-//
-// Two cases:
-//   - "messages" in payload: user-initiated turn; use those messages directly.
-//   - "from_agent" in payload: leaf agent reply; load saved transcript and
-//     append the agent result as a user message.
 func (w *Worker) systemPrompt() string {
 	if w.cfg.SystemPrompt != "" {
 		return w.cfg.SystemPrompt
@@ -192,83 +197,66 @@ func (w *Worker) systemPrompt() string {
 	return DefaultSystemPrompt
 }
 
-func (w *Worker) buildTranscript(session *models.Session, payload map[string]any) ([]runner.Message, error) {
-	sys := runner.Message{Role: "system", Content: w.systemPrompt()}
-
+// writeIncomingChunks writes user_message chunks to the session log based on
+// the task payload type. Agent-reply payloads ("from_agent") are skipped
+// because the agentq worker already wrote the dispatch_complete chunk.
+func (w *Worker) writeIncomingChunks(ctx context.Context, sessionID string, payload map[string]any) error {
 	if text, ok := payload["follow_up"].(string); ok {
-		transcript, err := w.loadTranscript(session)
-		if err != nil {
-			return nil, err
-		}
-		transcript = append(transcript, runner.Message{Role: "user", Content: text})
-		return append([]runner.Message{sys}, transcript...), nil
+		_, err := w.eq.Modify(ctx, sessionlog.AppendArg(sessionID, sessionlog.Chunk{
+			Type:    sessionlog.ChunkUserMessage,
+			Content: text,
+		}))
+		return err
 	}
 
-	if agentNameRaw, ok := payload["from_agent"]; ok {
-		agentName, _ := agentNameRaw.(string)
-		output, _ := payload["output"].(string)
-
-		transcript, err := w.loadTranscript(session)
-		if err != nil {
-			return nil, err
-		}
-		transcript = append(transcript, runner.Message{
-			Role:    "user",
-			Content: fmt.Sprintf("[Agent %s completed]\n%s", agentName, output),
-			Agent:   agentName,
-		})
-		return append([]runner.Message{sys}, transcript...), nil
+	if _, ok := payload["from_agent"]; ok {
+		// dispatch_complete chunk already written by the agentq worker.
+		return nil
 	}
 
 	if rawMessages, ok := payload["messages"]; ok {
 		b, err := json.Marshal(rawMessages)
 		if err != nil {
-			return nil, fmt.Errorf("encode messages: %w", err)
+			return fmt.Errorf("encode messages: %w", err)
 		}
 		var messages []runner.Message
 		if err := json.Unmarshal(b, &messages); err != nil {
-			return nil, fmt.Errorf("decode messages: %w", err)
+			return fmt.Errorf("decode messages: %w", err)
 		}
-		return append([]runner.Message{sys}, messages...), nil
-	}
-
-	return nil, fmt.Errorf("task payload has neither 'messages' nor 'from_agent'")
-}
-
-// loadTranscript returns the most recent supervisor_transcript artifact from
-// the session, or nil if no transcript has been saved yet (fresh session).
-func (w *Worker) loadTranscript(session *models.Session) ([]runner.Message, error) {
-	var latest *models.Artifact
-	for i := range session.Artifacts {
-		a := &session.Artifacts[i]
-		if a.Type != transcriptArtifactType {
-			continue
+		args := make([]entroq.ModifyArg, 0, len(messages))
+		for _, m := range messages {
+			if m.Role == "user" {
+				args = append(args, sessionlog.AppendArg(sessionID, sessionlog.Chunk{
+					Type:    sessionlog.ChunkUserMessage,
+					Content: m.Content,
+				}))
+			}
 		}
-		if latest == nil || a.CreatedAt.After(latest.CreatedAt) {
-			latest = a
+		if len(args) > 0 {
+			if _, err := w.eq.Modify(ctx, args...); err != nil {
+				return fmt.Errorf("write user message chunks: %w", err)
+			}
 		}
-	}
-	if latest == nil {
-		return nil, nil
-	}
-	var msgs []runner.Message
-	if err := json.Unmarshal([]byte(latest.Content), &msgs); err != nil {
-		return nil, fmt.Errorf("decode transcript artifact: %w", err)
-	}
-	return msgs, nil
-}
-
-// saveTranscript appends a new supervisor_transcript artifact and persists the session.
-func (w *Worker) saveTranscript(ctx context.Context, session *models.Session, transcript []runner.Message) error {
-	content, err := json.Marshal(transcript)
-	if err != nil {
-		return fmt.Errorf("marshal transcript: %w", err)
-	}
-	artifact := models.NewArtifact(session.ID, "supervisor", transcriptArtifactType, string(content))
-	return w.store.UpdateSession(ctx, session.ID, func(s *models.Session) error {
-		s.Artifacts = append(s.Artifacts, *artifact)
 		return nil
-	})
+	}
+
+	return fmt.Errorf("task payload has neither 'messages', 'follow_up', nor 'from_agent'")
+}
+
+// buildTranscript reads the full chunk log and returns the message slice for the LLM.
+// The system prompt is prepended; raw tool mechanics are never included.
+func (w *Worker) buildTranscript(ctx context.Context, sessionID string) ([]runner.Message, error) {
+	msgs, err := sessionlog.Transcript(ctx, w.eq, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sys := runner.Message{Role: "system", Content: w.systemPrompt()}
+	result := make([]runner.Message, 0, len(msgs)+1)
+	result = append(result, sys)
+	for _, m := range msgs {
+		result = append(result, runner.Message{Role: m.Role, Content: m.Content})
+	}
+	return result, nil
 }
 
 func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string, error) {

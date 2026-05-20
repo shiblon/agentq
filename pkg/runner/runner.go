@@ -49,8 +49,9 @@ type Message = models.Message
 
 // RunRequest is the JSON body the runner accepts.
 type RunRequest struct {
-	// JWT is the MCP session token. The runner passes it as ?token= in
-	// the MCP SSE URL; it is not inspected or validated here.
+	// JWT is the MCP session token. The runner passes it in the
+	// X-AgentQ-Session-Config header of the MCP config; it is not inspected
+	// or validated here.
 	JWT string `json:"jwt"`
 
 	// Messages is the conversation transcript assembled by the upstream
