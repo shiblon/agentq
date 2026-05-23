@@ -146,19 +146,38 @@ func (r *Runner) run(ctx context.Context, task RunRequest) (string, error) {
 
 // encodeMessages serialises messages to claude's stream-json input format:
 // one JSON object per line, {"type":"<role>","message":{"role":"<role>","content":[...]}}.
-//
-// Content is always an array of content blocks. The assistant role requires
-// this form (plain string causes a JS runtime error in the claude CLI);
-// using it uniformly keeps encoding consistent and supports future content
-// types (images, etc.) without structural changes.
 func encodeMessages(msgs []Message) ([]byte, error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
+		blocks := make([]any, 0, len(m.Content))
+		for _, b := range m.Content {
+			switch b.Type {
+			case "tool_use":
+				blocks = append(blocks, map[string]any{
+					"type":  "tool_use",
+					"id":    b.ID,
+					"name":  b.Name,
+					"input": b.Input,
+				})
+			case "tool_result":
+				blocks = append(blocks, map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": b.ToolUseID,
+					"content":     b.Text,
+					"is_error":    b.IsError,
+				})
+			default: // "text" and anything else
+				blocks = append(blocks, map[string]any{
+					"type": "text",
+					"text": b.Text,
+				})
+			}
+		}
 		line := map[string]any{
 			"type": m.Role,
 			"message": map[string]any{
 				"role":    m.Role,
-				"content": []map[string]string{{"type": "text", "text": m.Content}},
+				"content": blocks,
 			},
 		}
 		b, err := json.Marshal(line)

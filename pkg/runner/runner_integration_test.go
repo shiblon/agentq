@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/shiblon/agentq/pkg/models"
 )
 
 // fakeAgent writes a shell script to dir that discards stdin and args, then
@@ -71,8 +73,8 @@ func TestRunnerIntegration_BasicRoundTrip(t *testing.T) {
 	result := postRunRequest(t, ts.URL, RunRequest{
 		JWT: "fake-jwt",
 		Messages: []Message{
-			{Role: "system", Content: "You are a test agent."},
-			{Role: "user", Content: "Say something."},
+			models.TextMessage("system", "You are a test agent."),
+			models.TextMessage("user", "Say something."),
 		},
 	})
 
@@ -87,7 +89,7 @@ func TestRunnerIntegration_MissingJWT_Returns400(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	body, _ := json.Marshal(RunRequest{Messages: []Message{{Role: "user", Content: "hi"}}})
+	body, _ := json.Marshal(RunRequest{Messages: []Message{models.TextMessage("user", "hi")}})
 	resp, err := http.Post(ts.URL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -137,7 +139,7 @@ func TestRunnerIntegration_MCPConfigWritten(t *testing.T) {
 
 	postRunRequest(t, ts.URL, RunRequest{
 		JWT:      "my-test-jwt",
-		Messages: []Message{{Role: "user", Content: "go"}},
+		Messages: []Message{models.TextMessage("user", "go")},
 	})
 
 	argsData, err := os.ReadFile(argsFile)

@@ -18,7 +18,7 @@ services:
 
   # ── EntroQ: durable task queue ──────────────────────────────────────────────
   queue:
-    image: ghcr.io/shiblon/entroq-mem:v1.0.1
+    image: ghcr.io/shiblon/entroq-mem:1.1.0
     command: [serve]
     ports:
       - "37706:37706"
@@ -76,7 +76,9 @@ services:
       - --default-workdir=/workspace
     environment:
       <<: *eq-env
+      AGENTQ_CONFIG: /config/agents.yaml
     volumes:
+      - ./config/agents.compose.yaml:/config/agents.yaml:ro
       - workspace:/workspace
     depends_on:
       - queue

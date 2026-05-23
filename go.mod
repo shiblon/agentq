@@ -7,7 +7,7 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/mark3labs/mcp-go v0.54.0
 	github.com/open-policy-agent/opa v1.15.2
-	github.com/shiblon/entroq v1.0.1
+	github.com/shiblon/entroq v1.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	go.yaml.in/yaml/v3 v3.0.4

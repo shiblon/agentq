@@ -163,7 +163,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	}
 
 	for i, m := range transcript {
-		log.Printf("supervisor: transcript[%d] role=%s content=%.120s", i, m.Role, m.Content)
+		log.Printf("supervisor: transcript[%d] role=%s content=%.120s", i, m.Role, m.Content.TextOf())
 	}
 
 	output, err := w.callRunner(ctx, runner.RunRequest{
@@ -174,20 +174,34 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		return nil, worker.RetryErrorf("supervisor: runner: %v", err)
 	}
 
+	// Detect dispatch turns: if any child dispatches are pending, the runner
+	// called dispatch_to_agent. Skip ChunkAssistantMessage — the tool_use/
+	// tool_result pair already carries the context. Writing the "Dispatched!
+	// fire-and-forget" text as an assistant chunk would appear after
+	// ChunkDispatchPending in the log (due to timing), corrupting transcript order.
+	pending, err := sessionlog.PendingList(ctx, w.eq, sessionID)
+	if err != nil {
+		return nil, worker.RetryErrorf("supervisor: check pending: %v", err)
+	}
+
 	replyQueue := models.UserReplyQueue(session.ID)
 	resultTask := models.NewTask(replyQueue, appTask.SessionURI, map[string]any{
 		"from_agent": "supervisor",
 		"output":     output,
 	})
 
-	return []entroq.ModifyArg{
-		sessionlog.AppendArg(sessionID, sessionlog.Chunk{
-			Type:    sessionlog.ChunkAssistantMessage,
-			Content: output,
-		}),
+	args := []entroq.ModifyArg{
 		entroq.InsertingInto(replyQueue, entroq.WithValue(resultTask)),
 		task.Delete(),
-	}, nil
+	}
+	if len(pending) == 0 {
+		// Synthesis turn: record the assistant response in the transcript.
+		args = append(args, sessionlog.AppendArg(sessionID, sessionlog.Chunk{
+			Type:    sessionlog.ChunkAssistantMessage,
+			Content: output,
+		}))
+	}
+	return args, nil
 }
 
 func (w *Worker) systemPrompt() string {
@@ -228,7 +242,7 @@ func (w *Worker) writeIncomingChunks(ctx context.Context, sessionID string, payl
 			if m.Role == "user" {
 				args = append(args, sessionlog.AppendArg(sessionID, sessionlog.Chunk{
 					Type:    sessionlog.ChunkUserMessage,
-					Content: m.Content,
+					Content: m.Content.TextOf(),
 				}))
 			}
 		}
@@ -250,12 +264,10 @@ func (w *Worker) buildTranscript(ctx context.Context, sessionID string) ([]runne
 	if err != nil {
 		return nil, err
 	}
-	sys := runner.Message{Role: "system", Content: w.systemPrompt()}
+	sys := models.TextMessage("system", w.systemPrompt())
 	result := make([]runner.Message, 0, len(msgs)+1)
 	result = append(result, sys)
-	for _, m := range msgs {
-		result = append(result, runner.Message{Role: m.Role, Content: m.Content})
-	}
+	result = append(result, msgs...)
 	return result, nil
 }
 

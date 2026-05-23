@@ -2,119 +2,112 @@
 
 # Long
 
-## transcript-structure-problem
-Supervisor transcript stores flat {role, content string} messages but claude's actual conversation includes structured tool_use and tool_result content blocks. When the supervisor replays a transcript after an agent returns (from_agent case), claude sees its prior text output ('Dispatched!') but not the tool call that produced it -- so it dispatches again.
+## blog-readiness
+Blog-readiness status (updated 2026-05-20).
 
-Three options under consideration:
-1. Store structured transcripts -- capture full stream-json tool_use/tool_result blocks, replay them properly. Correct long-term design; requires models.Message to support content blocks.
-2. Synthesis-only for from_agent case -- don't replay history, give claude: 'User asked X, agent Y returned Z, synthesize response.' Loses context but breaks replay loop immediately.
-3. Two-phase supervisor -- dispatch turn is fire-and-forget, synthesis turn starts fresh with summary context.
+**Post 1: DONE** — 'What I Learned From Building AgentQ - A Secure Agent'
+Published at highentropy.com/content/posts/agentq-learnings.md
+Covers: sandbox, supervisor model, MCP as sandbox, stateless design, prompt transcript hazards, reliability, transitive permissions.
 
-Next session: choose direction before implementing.
+**Post 2: Planned** — Agent identity model post
+Chris wants to write this before designing the full identity framework. It is the input for the design work. Do not design without it.
+See long/agent-identity and long/agent-identity-framework for design context.
 
-## supervisor-tool-restriction
-Supervisor sees all Claude Code native tools (Agent, TaskCreate, WebFetch, cron, etc.) instead of only dispatch_to_agent. Need to restrict the supervisor's tool visibility to only its configured MCP tools. The claude CLI likely has an --allowedTools flag that can limit this. Also need to inject available agent roster + descriptions into the system prompt so the supervisor knows what agents exist and what they can do.
+**Remaining blog-readiness gaps** (from earlier audit):
+- Review UI
+- Security audit / gaps documentation
+- UI dashboard for session visibility
+- Deployment story (k8s)
+- Zero-config ideal
 
-## pending-work
-## Pending before manual test
+## supervisor-llm-backend
+## Supervisor LLM backend (2026-05-19)
 
-**1. ReplyTo in JWT claims -- DONE (2026-05-18)**
-- mcp.Claims.ReplyTo added (claim key: mcp_reply_to)
-- dispatch_to_agent reads c.ReplyTo from JWT; errors if absent
-- SupervisorQueue dropped from mcp.Config and AllOrchestrationTools signature
-- Supervisor worker mints JWT with ReplyTo = task.Queue (its own inbox)
-- --supervisor-queue flag removed from agentq mcp serve
+### Decision: CLI first, API as fallback
+Support both CLI subprocess and direct API. Start with CLI; switch if CLI proves
+insufficient (e.g. mid-turn interception needed, tool loop control required).
 
-**2. Wire --eq-addr into agentq mcp serve -- STILL PENDING**
-- runMCPServe never calls openEQ; cfg.EQ never set; dispatch_to_agent never registered
-- Fix: call openEQ(ctx) in runMCPServe when --eq-addr present; populate cfg.EQ and cfg.QueueNamespace
+### Abstraction boundary
+Supervisor worker logic (chunk log, queue handling, dispatch management, transcript
+construction) is backend-agnostic. Only the LLM invocation step differs.
 
-**Later:**
-- Different runner types (API-based Claude API, OpenAI, Gemini)
-- MCP behind eqlink (deferred -- see mcp-eqlink-option)
-- Compact mode supervisor LLM summarization (stub exists in session meta)
+Interface: Turn(ctx, transcript) → (text, []ToolCall, error)
+- CLI impl: subprocess + stream-json output parsing, one invocation per turn
+- API impl: direct Anthropic API client, harness owns tool loop
 
-## agent-tool-set-design
-Tool ceiling model (settled):
-- Each agent type has a configured tool ceiling (from agents.yaml tools: field)
-- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load (ExpandTools)
-- tools: [] or absent = fail closed, zero tools permitted
-- Task payload carries optional allowed_tools and blocked_tools lists; Supervisor can narrow for a specific task
-- AgentQ computes: intersect(configured_tools, allowed_tools) - blocked_tools -> JWT ToolAllowlist
-- Workdir comes from task payload (per-session, set by Supervisor)
+### CLI constraints to watch for
+- Can only parse output post-hoc (no mid-turn interception)
+- One structural action per turn by prompt design (dispatch OR respond, not both)
+- If these break down in practice, that is the signal to switch to API
 
-agents.yaml per-agent fields: runner_url, mcp_addr, tools (list or ["*"])
+## supervisor-session-queues
+## Supervisor queue model (2026-05-19)
 
-## runner-types
-Current runner (pkg/runner) is claude-CLI-specific. Future types will be needed:
-- API-based (Claude API, OpenAI, Gemini) -- no subprocess, no stream-json
-- Different CLI tools
-- Language-specific runners (Python SDK, etc.)
+### Two queues, one supervisor worker pool
+- supervisors/user-inbox: user turns. Session ID in envelope. Supervisor builds
+  context from chunk log, calls LLM, appends response chunks.
+- supervisors/agent-inbox: dispatch results. Session ID in envelope. Supervisor
+  appends dispatch_complete chunk, checks pending set, re-queues for LLM if all
+  dispatches resolved.
 
-The interface (RunRequest/RunResponse over HTTP) is already well-defined. Workers just POST to a URL and don't care what's behind it. Don't abstract prematurely -- add new runner packages when a second one is actually needed.
+Same worker pool handles both queues. The two types represent fundamentally different
+operations and are kept separate for semantic clarity and EntroQ debuggability.
 
-## mcp-eqlink-option
-MCP behind eqlink -- future option (noted 2026-05-18, not worth doing now).
+### Session routing
+No per-session queues. Session ID in the task envelope routes each event to the
+correct chunk log. DocStore atomicity handles concurrent writes safely.
 
-With Streamable HTTP + WithDisableStreaming(true), Runner->MCP is pure request-response, compatible with eqlink. Would make ALL inter-service communication queue-mediated: uniform backpressure, audit logging, one operational model.
+### Transactional consistency
+Queue and docstore operations happen in the same EntroQ transaction. A dispatch
+result is processed as: delete pending entry + append dispatch_complete chunk +
+re-enqueue supervisor — all atomic. State is always consistent.
 
-Downside: MCP tool calls are low-latency (agent blocks waiting); queue round-trip adds latency for every file read, git status, etc. Any MCP server-push features (progress, sampling) would break.
+The only genuine race: agent result arrives simultaneously with a new user message.
+Benign ordering ambiguity, not a correctness problem. Exists in any chat system.
 
-Revisit if MCP becomes a scaling bottleneck or uniform queue-mediation becomes a priority for audit.
+### Session initiation (connection upgrade)
+A session initiator (or API endpoint) watches a generic inbox, creates the session,
+sets up the chunk log, enqueues the first user turn to supervisors/user-inbox,
+returns session ID to caller. All subsequent events use the two queues above.
 
-## mcp-transport
-Streamable HTTP (settled 2026-05-18). Switched from SSE.
+## supervisor-chunk-log
+## Supervisor state machine — chunk log design (2026-05-19)
 
-Session JWT in X-AgentQ-Session-Config header (not ?token= query param).
-Named deliberately: it is configuration, not authentication. Authorization: Bearer rejected -- implies auth semantics.
+### Core decision
+Supervisor session state is stored in the EntroQ docstore with two sub-namespaces:
 
-Server is stateless: WithHTTPContextFunc fires per-request; no claims store, no session ID generator, no unregister hooks. Every request carries its own JWT and is validated uniformly.
+**Log** (append-only, ordered): sessions/abc123/log / <seq>
+- user_message, assistant_message, dispatch_pending, dispatch_complete chunks
+- Source of truth for transcript reconstruction and UI rendering
 
-Runner --mcp-config format: type:'http', url: base URL, headers: {'X-AgentQ-Session-Config': jwt}
-Client: mcpclient.NewStreamableHttpClient(url, transport.WithHTTPHeaders(headers))
+**Pending set** (mutable): sessions/abc123/pending / <child_session_id>
+- Tracks in-flight dispatches; entries deleted when child completes
+- Empty pending set = all dispatches resolved = supervisor may call LLM
 
-## mcp-jwt-trust-model
-Three-party model: Supervisor vouches, AgentQ/Supervisor Worker issues, MCP verifies.
+### Transcript derivation
+Built fresh each turn from the log. Conversation entries replayed verbatim.
+Dispatch records rendered as semantic events (not raw tool_use/tool_result).
+The LLM never sees raw MCP tool mechanics from previous turns.
 
-**Supervisor**: vouches -- expresses intent (messages, workdir, tool bans). Never holds a signing key.
-**AgentQ/Supervisor Worker**: issues -- holds private signing key, mints JWT encoding intent intersected with configured tool ceiling. Only component with issuance capability.
-**MCP server**: verifies -- holds only public JWKS. Validates JWTs, extracts Claims (tools, workdir), enforces them. Cannot mint.
+### Push model for re-queuing
+Child task payload carries parent_session_id + dispatch_id.
+When child worker completes:
+  1. Deletes its entry from parent's pending set
+  2. Appends dispatch_complete chunk to parent's log
+  3. Re-enqueues parent session task
 
-Key storage: Vault or similar in production; SIGHUP rotation supported.
-Dev: local key file or ephemeral generated key (--insecure-no-keys); --insecure-skip-verification on MCP bypasses entirely.
+Parent never polls. Durable and crash-recoverable.
 
-## system-architecture
-Four components in cmd/agentq:
+### Fan-in for parallel dispatches
+Supervisor fires N agents: writes N entries to pending set + N dispatch_pending to log.
+Each child completion shrinks pending set by 1 and re-enqueues supervisor.
+Supervisor wakes, checks pending set:
+  - Non-empty → still waiting; optionally update user on status; no LLM call
+  - Empty → all answers in; build full context from log; call LLM
 
-**MCP server** (pkg/mcp, agentq mcp serve :8081)
-- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
-- Tools: file, git, go, search, shell + dispatch_to_agent (when EQ wired -- PENDING)
-- Key: --jwks-file / --insecure-skip-verification; SIGHUP reloads
-- dispatch_to_agent uses supervisorQueue from server config (not JWT claim -- see pending-work)
-
-**Runner** (pkg/runner, agentq runner serve :8082)
-- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
-- Writes --mcp-config tempfile; invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
-- Config: --command (default: claude), --args (default: --print), --mcp-addr
-
-**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
-- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner
-- Posts result to task.ReplyTo if set, else cfg.ReplyQueue (default: agentq/supervisor/inbox)
-- Key: --key-file / --insecure-no-keys
-
-**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
-- Claims from agentq/supervisor/inbox (user prompts AND agent replies on same queue)
-- User prompt: payload.messages present; agent reply: payload.from_agent + payload.output
-- Builds transcript from supervisor_transcript artifact, mints JWT with dispatch_to_agent, calls runner
-- Saves updated transcript, posts output to models.UserReplyQueue(sessionID)
-- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools
-
-**Submit CLI** (agentq submit --prompt)
-- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}]
-- Blocks on models.UserReplyQueue(sessionID), prints output
-
-**Reply queue** (models.UserReplyQueue)
-- Deterministic: agentq/sessions/<id>/reply -- derived from session ID, never stored
+### Dispatch concurrency
+V1: serial (max 1 entry in pending at a time). Data model already handles N.
+Parallelism deferred; no structural change required to enable it later.
 
 ## workspace-file-sharing
 Design decided: Gitea for VCS, MinIO for large/binary files.
@@ -184,25 +177,6 @@ Where the strings are (bones to add):
 - Task payloads -- carry agent names but no credentials; nothing binds a worker to the identity it claims
 
 The work: take every place a string stands in for an identity and replace it with something issued and verifiable. Zitadel issues credentials, OPA verifies them, queue payloads carry the identity forward between hops.
-
-## blog-readiness
-Blog-readiness as of 2026-04-23. Items marked DONE have been completed.
-
-DONE: Review approve/reject in the UI (POST /api/v1/review/{id}/approve|reject + buttons in card)
-DONE: Start all workers in one command (agentq run --all)
-DONE: Security basics (JWT auth, OPA authz, token exchange, PKCE web auth, device flow CLI login)
-DONE: agentq agent update command
-DONE: Session cancel endpoint + CLI + UI button
-DONE: Compact mode supervisor summarization
-
-Still pending:
-- UI polish -- current interface is too bare; needs a visual dashboard
-- Deployment -- docker-compose dev only; need top 2-3 deployment targets airtight before 0.1
-- Blog post series structure -- multiple posts, not one; plan how to divide them
-
-North-star: zero-configuration story. User installs agentq and gets a working multi-agent loop with no config file, no env vars, no manual queue setup. Every design decision should be evaluated against how much it moves toward or away from that ideal.
-
-Closing sentence the series should earn: "Every action taken in this system can be traced to a human authorization decision, through a chain of issued credentials, with no gaps."
 
 ## agent-identity-framework
 OAuth answered the authorization question. OIDC answered the human authentication question. Nobody has properly answered the agent authentication question yet. agentq is the showcase for what that answer looks like.
@@ -978,6 +952,80 @@ JWT flow: Supervisor mints JWT → includes in task payload → AgentQ claims ta
 → forwards JWT in HTTP POST to Runner → Runner puts ?token=<jwt> in MCP SSE URL.
 AgentQ never mints; it just forwards what it received.
 
+## mcp-jwt-trust-model
+Three-party model: Supervisor vouches, AgentQ/Supervisor Worker issues, MCP verifies.
+
+**Supervisor**: vouches -- expresses intent (messages, workdir, tool bans). Never holds a signing key.
+**AgentQ/Supervisor Worker**: issues -- holds private signing key, mints JWT encoding intent intersected with configured tool ceiling. Only component with issuance capability.
+**MCP server**: verifies -- holds only public JWKS. Validates JWTs, extracts Claims (tools, workdir), enforces them. Cannot mint.
+
+Key storage: Vault or similar in production; SIGHUP rotation supported.
+Dev: local key file or ephemeral generated key (--insecure-no-keys); --insecure-skip-verification on MCP bypasses entirely.
+
+## mcp-transport
+Streamable HTTP (settled 2026-05-18). Switched from SSE.
+
+Session JWT in X-AgentQ-Session-Config header (not ?token= query param).
+Named deliberately: it is configuration, not authentication. Authorization: Bearer rejected -- implies auth semantics.
+
+Server is stateless: WithHTTPContextFunc fires per-request; no claims store, no session ID generator, no unregister hooks. Every request carries its own JWT and is validated uniformly.
+
+Runner --mcp-config format: type:'http', url: base URL, headers: {'X-AgentQ-Session-Config': jwt}
+Client: mcpclient.NewStreamableHttpClient(url, transport.WithHTTPHeaders(headers))
+
+## mcp-eqlink-option
+MCP behind eqlink -- future option (noted 2026-05-18, not worth doing now).
+
+With Streamable HTTP + WithDisableStreaming(true), Runner->MCP is pure request-response, compatible with eqlink. Would make ALL inter-service communication queue-mediated: uniform backpressure, audit logging, one operational model.
+
+Downside: MCP tool calls are low-latency (agent blocks waiting); queue round-trip adds latency for every file read, git status, etc. Any MCP server-push features (progress, sampling) would break.
+
+Revisit if MCP becomes a scaling bottleneck or uniform queue-mediation becomes a priority for audit.
+
+## runner-types
+Current runner (pkg/runner) is claude-CLI-specific. Future types will be needed:
+- API-based (Claude API, OpenAI, Gemini) -- no subprocess, no stream-json
+- Different CLI tools
+- Language-specific runners (Python SDK, etc.)
+
+The interface (RunRequest/RunResponse over HTTP) is already well-defined. Workers just POST to a URL and don't care what's behind it. Don't abstract prematurely -- add new runner packages when a second one is actually needed.
+
+## system-architecture
+Four components in cmd/agentq:
+
+**MCP server** (pkg/mcp, agentq mcp serve :8081)
+- Streamable HTTP pool server, stateless, JWT-authenticated via X-AgentQ-Session-Config header
+- Tools: file, git, go, search, shell + dispatch_to_agent (when EQ wired -- PENDING)
+- Key: --jwks-file / --insecure-skip-verification; SIGHUP reloads
+- dispatch_to_agent uses supervisorQueue from server config (not JWT claim -- see pending-work)
+
+**Runner** (pkg/runner, agentq runner serve :8082)
+- HTTP microservice: POST / with {jwt, messages}, runs claude CLI, returns output
+- Writes --mcp-config tempfile; invokes: claude --print --mcp-config ... --input-format stream-json --output-format stream-json --verbose
+- Config: --command (default: claude), --args (default: --print), --mcp-addr
+
+**AgentQ worker** (pkg/workers/agentq, agentq worker serve --agent <name>)
+- Claims from agentq/<name>/inbox, mints JWT (tools from agents.yaml ceiling), calls runner
+- Posts result to task.ReplyTo if set, else cfg.ReplyQueue (default: agentq/supervisor/inbox)
+- Key: --key-file / --insecure-no-keys
+
+**Supervisor worker** (pkg/workers/supervisor, agentq supervisor serve)
+- Claims from agentq/supervisor/inbox (user prompts AND agent replies on same queue)
+- User prompt: payload.messages present; agent reply: payload.from_agent + payload.output
+- Builds transcript from supervisor_transcript artifact, mints JWT with dispatch_to_agent, calls runner
+- Saves updated transcript, posts output to models.UserReplyQueue(sessionID)
+- Key: --key-file / --insecure-no-keys, --runner-url, --mcp-addr, --tools
+
+**Submit CLI** (agentq submit --prompt)
+- Creates session, enqueues to supervisor with messages=[{role:user, content:prompt}]
+- Blocks on models.UserReplyQueue(sessionID), prints output
+
+**Reply queue** (models.UserReplyQueue)
+- Deterministic: agentq/sessions/<id>/reply -- derived from session ID, never stored
+
+## pending-work
+
+
 ## Pending work before manual test (2026-05-18)
 **Immediate (blocks manual test):**
 
@@ -1117,4 +1165,45 @@ on MCP server bypasses validation entirely.
 
 ## agents.yaml additions
 Each agent entry gains: runner_url, mcp_addr, tools (list or ["*"]).
+
+## agent-tool-set-design
+Tool ceiling model (settled):
+- Each agent type has a configured tool ceiling (from agents.yaml tools: field)
+- tools: ["*"] = explicit permit-all, expands to AllFileTools() at config load (ExpandTools)
+- tools: [] or absent = fail closed, zero tools permitted
+- Task payload carries optional allowed_tools and blocked_tools lists; Supervisor can narrow for a specific task
+- AgentQ computes: intersect(configured_tools, allowed_tools) - blocked_tools -> JWT ToolAllowlist
+- Workdir comes from task payload (per-session, set by Supervisor)
+
+agents.yaml per-agent fields: runner_url, mcp_addr, tools (list or ["*"])
+
+## supervisor-tool-restriction
+Supervisor sees all Claude Code native tools (Agent, TaskCreate, WebFetch, cron, etc.) instead of only dispatch_to_agent. Need to restrict the supervisor's tool visibility to only its configured MCP tools. The claude CLI likely has an --allowedTools flag that can limit this. Also need to inject available agent roster + descriptions into the system prompt so the supervisor knows what agents exist and what they can do.
+
+## transcript-structure-problem
+Supervisor transcript stores flat {role, content string} messages but claude's actual conversation includes structured tool_use and tool_result content blocks. When the supervisor replays a transcript after an agent returns (from_agent case), claude sees its prior text output ('Dispatched!') but not the tool call that produced it -- so it dispatches again.
+
+Three options under consideration:
+1. Store structured transcripts -- capture full stream-json tool_use/tool_result blocks, replay them properly. Correct long-term design; requires models.Message to support content blocks.
+2. Synthesis-only for from_agent case -- don't replay history, give claude: 'User asked X, agent Y returned Z, synthesize response.' Loses context but breaks replay loop immediately.
+3. Two-phase supervisor -- dispatch turn is fire-and-forget, synthesis turn starts fresh with summary context.
+
+Next session: choose direction before implementing.
+
+## Pending before manual test
+**1. ReplyTo in JWT claims -- DONE (2026-05-18)**
+- mcp.Claims.ReplyTo added (claim key: mcp_reply_to)
+- dispatch_to_agent reads c.ReplyTo from JWT; errors if absent
+- SupervisorQueue dropped from mcp.Config and AllOrchestrationTools signature
+- Supervisor worker mints JWT with ReplyTo = task.Queue (its own inbox)
+- --supervisor-queue flag removed from agentq mcp serve
+
+**2. Wire --eq-addr into agentq mcp serve -- STILL PENDING**
+- runMCPServe never calls openEQ; cfg.EQ never set; dispatch_to_agent never registered
+- Fix: call openEQ(ctx) in runMCPServe when --eq-addr present; populate cfg.EQ and cfg.QueueNamespace
+
+**Later:**
+- Different runner types (API-based Claude API, OpenAI, Gemini)
+- MCP behind eqlink (deferred -- see mcp-eqlink-option)
+- Compact mode supervisor LLM summarization (stub exists in session meta)
 

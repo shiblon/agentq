@@ -77,7 +77,7 @@ func runChat(cmd *cobra.Command, _ []string) error {
 			result, err := workflow.SubmitSession(ctx, st, eq, workflow.SubmitRequest{
 				UserID:          userID,
 				Prompt:          input,
-				Messages:        []models.Message{{Role: "user", Content: input}},
+				Messages:        []models.Message{models.TextMessage("user", input)},
 				Repo:            repo,
 				SupervisorQueue: supervisorQueue,
 			})

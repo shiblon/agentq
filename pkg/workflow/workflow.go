@@ -94,7 +94,7 @@ func SubmitSession(ctx context.Context, st *store.Store, eq *entroq.EntroQ, req 
 	sessionURI := store.SessionURI(session.ID)
 	messages := req.Messages
 	if messages == nil {
-		messages = []models.Message{{Role: "user", Content: req.Prompt}}
+		messages = []models.Message{models.TextMessage("user", req.Prompt)}
 	}
 	payload := map[string]any{
 		"messages": messages,

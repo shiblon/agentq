@@ -234,7 +234,7 @@ func TestProcessTask_MissingMessages(t *testing.T) {
 	w := New(testConfig(t, ts.URL), nil)
 	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
-		Messages: nil,
+		Messages: nil, //nolint
 	})
 	_, err := w.ProcessTask(context.Background(), task, appTask)
 	if err == nil {
@@ -251,7 +251,7 @@ func TestProcessTask_RunnerError(t *testing.T) {
 	w := New(testConfig(t, ts.URL), nil)
 	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
 		Workdir:  "/work",
-		Messages: []runner.Message{{Role: "user", Content: "go"}},
+		Messages: []runner.Message{models.TextMessage("user", "go")},
 	})
 	_, err := w.ProcessTask(context.Background(), task, appTask)
 	if err == nil {
@@ -277,8 +277,8 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 	task, appTask := newFakeTask(t, sessionURI, Payload{
 		Workdir: "/var/sessions/test-session",
 		Messages: []runner.Message{
-			{Role: "system", Content: "You are a coder."},
-			{Role: "user", Content: "Write a function."},
+			models.TextMessage("system", "You are a coder."),
+			models.TextMessage("user", "Write a function."),
 		},
 		BlockedTools: []string{"write_file"},
 	})

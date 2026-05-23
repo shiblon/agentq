@@ -37,12 +37,13 @@ const (
 
 // Chunk is a single entry in a session's ordered event log.
 type Chunk struct {
-	Type      ChunkType `json:"type"`
-	Content   string    `json:"content,omitempty"`   // message text, for message types
-	Agent     string    `json:"agent,omitempty"`     // agent name, for dispatch types
-	ChildID   string    `json:"child_id,omitempty"`  // child session ID, for dispatch types
-	Summary   string    `json:"summary,omitempty"`   // result summary, for dispatch_complete
-	CreatedAt time.Time `json:"created_at"`
+	Type      ChunkType             `json:"type"`
+	Content   string                `json:"content,omitempty"`  // message text, for message types
+	Agent     string                `json:"agent,omitempty"`    // agent name, for dispatch types
+	ChildID   string                `json:"child_id,omitempty"` // child session ID, for dispatch types
+	Summary   string                `json:"summary,omitempty"`  // result summary, for dispatch_complete (legacy)
+	Result    *models.DispatchResult `json:"result,omitempty"`  // structured result, for dispatch_complete
+	CreatedAt time.Time             `json:"created_at"`
 }
 
 // pendingEntry is the docstore content for an in-flight dispatch record.
@@ -136,39 +137,65 @@ func Chunks(ctx context.Context, eq *entroq.EntroQ, sessionID string) ([]Chunk, 
 
 // Transcript builds a message slice from the chunk log suitable for LLM input.
 //
-// Conversation chunks (user_message, assistant_message) are replayed verbatim.
-// Completed dispatch chunks (dispatch_complete) are rendered as assistant
-// messages so the result is attributed to the assistant's own action.
-// Pending dispatch chunks (dispatch_pending) are omitted — still in flight.
-//
-// Adjacent messages of the same role are collapsed into one with a blank-line
-// separator, preserving the alternating user/assistant structure required by
-// the Claude API and CLI.
+// User and assistant messages are replayed as structured content blocks.
+// Dispatch events are reconstructed as tool_use/tool_result pairs using a
+// synthetic ID ("dispatch_<childID>"), giving the LLM the correct semantic
+// context: dispatch_pending becomes a tool_use in the preceding assistant turn,
+// and dispatch_complete becomes a tool_result in a user message.
+// Pending dispatch chunks (dispatch_pending without a matching complete) are
+// omitted — still in flight.
 func Transcript(ctx context.Context, eq *entroq.EntroQ, sessionID string) ([]models.Message, error) {
 	chunks, err := Chunks(ctx, eq, sessionID)
 	if err != nil {
 		return nil, err
 	}
+
 	var msgs []models.Message
-	for _, c := range chunks {
-		var role, content string
-		switch c.Type {
-		case ChunkUserMessage:
-			role, content = "user", c.Content
-		case ChunkAssistantMessage:
-			role, content = "assistant", c.Content
-		case ChunkDispatchComplete:
-			role = "assistant"
-			content = fmt.Sprintf("[%s agent result]\n%s", c.Agent, c.Summary)
-		case ChunkDispatchPending:
-			continue // omit: still in flight
-		}
-		if len(msgs) > 0 && msgs[len(msgs)-1].Role == role {
-			msgs[len(msgs)-1].Content += "\n\n" + content
-		} else {
-			msgs = append(msgs, models.Message{Role: role, Content: content})
+	var pendingAssistant models.ContentList
+
+	flushAssistant := func() {
+		if len(pendingAssistant) > 0 {
+			msgs = append(msgs, models.Message{Role: "assistant", Content: pendingAssistant})
+			pendingAssistant = nil
 		}
 	}
+
+	for _, c := range chunks {
+		switch c.Type {
+		case ChunkUserMessage:
+			flushAssistant()
+			msgs = append(msgs, models.TextMessage("user", c.Content))
+
+		case ChunkAssistantMessage:
+			pendingAssistant = append(pendingAssistant, models.TextBlock(c.Content))
+
+		case ChunkDispatchPending:
+			// Accumulate tool_use block; don't flush yet — a single assistant turn
+			// may contain multiple dispatches (fan-out), all belonging to the same
+			// assistant message.
+			pendingAssistant = append(pendingAssistant, models.ToolUseBlock(
+				"dispatch_"+c.ChildID,
+				"dispatch_to_agent",
+				map[string]any{"agent": c.Agent},
+			))
+
+		case ChunkDispatchComplete:
+			// End the assistant turn before the tool_result.
+			flushAssistant()
+			var content any
+			if c.Result != nil {
+				content = c.Result
+			} else {
+				content = fmt.Sprintf("[%s agent result]\n%s", c.Agent, c.Summary)
+			}
+			msgs = append(msgs, models.Message{
+				Role:    "user",
+				Content: models.ContentList{models.ToolResultBlock("dispatch_"+c.ChildID, content)},
+			})
+		}
+	}
+
+	flushAssistant()
 	return msgs, nil
 }
 

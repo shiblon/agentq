@@ -172,12 +172,18 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		if err != nil {
 			return nil, fmt.Errorf("agentq %s: find pending: %w", w.cfg.Name, err)
 		}
+		result := models.DispatchResult{
+			AgentName: w.cfg.Name,
+			SessionID: payload.ChildSessionID,
+			Status:    models.DispatchCompleted,
+			Summary:   output,
+		}
 		args = append(args,
 			sessionlog.AppendArg(payload.ParentSessionID, sessionlog.Chunk{
 				Type:    sessionlog.ChunkDispatchComplete,
 				Agent:   w.cfg.Name,
 				ChildID: payload.ChildSessionID,
-				Summary: output,
+				Result:  &result,
 			}),
 			entroq.DeletingDoc(pendingDoc),
 		)
