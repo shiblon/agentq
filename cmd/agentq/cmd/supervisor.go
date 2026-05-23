@@ -53,6 +53,7 @@ func init() {
 	supervisorServeCmd.Flags().String("default-workdir", "", "Fallback workdir when session has no workspace configured")
 	supervisorServeCmd.Flags().String("prompt", "", "System prompt for the supervisor (overrides built-in default)")
 	supervisorServeCmd.Flags().String("prompt-file", "", "Path to a file containing the supervisor system prompt")
+	supervisorServeCmd.Flags().Int("max-dispatches", 20, "Maximum number of agent dispatches per session (0 = unlimited)")
 
 	_ = supervisorServeCmd.MarkFlagRequired("runner-url")
 	_ = supervisorServeCmd.MarkFlagRequired("mcp-addr")
@@ -69,6 +70,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 	defaultWorkdir, _ := cmd.Flags().GetString("default-workdir")
 	prompt, _ := cmd.Flags().GetString("prompt")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
+	maxDispatches, _ := cmd.Flags().GetInt("max-dispatches")
 
 	if promptFile != "" {
 		b, err := os.ReadFile(promptFile)
@@ -130,6 +132,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		Tools:          tools,
 		DefaultWorkdir: defaultWorkdir,
 		SystemPrompt:   supervisor.BuildSystemPrompt(prompt, agentInfos),
+		MaxDispatches:  maxDispatches,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

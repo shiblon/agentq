@@ -199,6 +199,22 @@ func Transcript(ctx context.Context, eq *entroq.EntroQ, sessionID string) ([]mod
 	return msgs, nil
 }
 
+// CountDispatches returns the total number of dispatch_pending chunks in the
+// session log. Used by the supervisor to enforce a per-session dispatch budget.
+func CountDispatches(ctx context.Context, eq *entroq.EntroQ, sessionID string) (int, error) {
+	chunks, err := Chunks(ctx, eq, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, c := range chunks {
+		if c.Type == ChunkDispatchPending {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // secondaryKey returns a lexicographically ordered, collision-resistant key
 // suitable for document ordering within a session. Format: 20-digit nanosecond
 // timestamp padded to ensure sort order, plus 8 hex random digits for uniqueness.

@@ -78,6 +78,11 @@ type Payload struct {
 	// ChildSessionID is the ID generated at dispatch time identifying this
 	// subtask in the parent session's pending set and chunk log.
 	ChildSessionID string `json:"child_session_id,omitempty"`
+
+	// Depth is the dispatch nesting level for this task. Threaded through from
+	// the parent's JWT claim via dispatch_to_agent so the MCP server can enforce
+	// MaxDispatchDepth on any further dispatches this agent attempts.
+	Depth int `json:"depth,omitempty"`
 }
 
 // Worker claims tasks from an EntroQ inbox and dispatches them to the runner.
@@ -134,6 +139,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		SessionID:     appTask.SessionURI,
 		Workdir:       payload.Workdir,
 		ToolAllowlist: effectiveTools,
+		Depth:         payload.Depth,
 		Expiry:        time.Now().Add(2 * time.Hour),
 	})
 	if err != nil {

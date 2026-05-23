@@ -20,13 +20,14 @@ import (
 // constructed as <namespace>/<agent>/inbox.
 // The reply_to address for dispatched tasks is read from the JWT ReplyTo claim,
 // so each supervisor instance declares its own inbox without server-side config.
-func AllOrchestrationTools(eq *entroq.EntroQ, namespace string) []server.ServerTool {
+// maxDepth is the maximum dispatch nesting level; 0 means unlimited.
+func AllOrchestrationTools(eq *entroq.EntroQ, namespace string, maxDepth int) []server.ServerTool {
 	return []server.ServerTool{
-		dispatchToAgentTool(eq, namespace),
+		dispatchToAgentTool(eq, namespace, maxDepth),
 	}
 }
 
-func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool {
+func dispatchToAgentTool(eq *entroq.EntroQ, namespace string, maxDepth int) server.ServerTool {
 	def := mcplib.NewTool("dispatch_to_agent",
 		mcplib.WithDescription(
 			"Dispatch a task to a named leaf agent. Fire-and-forget: returns immediately "+
@@ -49,6 +50,13 @@ func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool 
 		Tool: def,
 		Handler: withAllowlistCheck("dispatch_to_agent", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx) // non-nil guaranteed by withAllowlistCheck
+
+			if maxDepth > 0 && c.Depth >= maxDepth {
+				return mcplib.NewToolResultError(fmt.Sprintf(
+					"dispatch depth limit reached (current=%d, max=%d): agents at this level may not dispatch further",
+					c.Depth, maxDepth,
+				)), nil
+			}
 
 			agentName, err := req.RequireString("agent")
 			if err != nil {
@@ -99,6 +107,7 @@ func dispatchToAgentTool(eq *entroq.EntroQ, namespace string) server.ServerTool 
 					"messages":          messages,
 					"parent_session_id": parentSessionID,
 					"child_session_id":  childSessionID,
+					"depth":             c.Depth + 1,
 				},
 				models.WithReplyTo(c.ReplyTo),
 			)

@@ -53,6 +53,12 @@ type Config struct {
 	// SystemPrompt is prepended to every transcript as a system message.
 	// If empty, DefaultSystemPrompt is used.
 	SystemPrompt string
+
+	// MaxDispatches is the maximum number of dispatch_to_agent calls allowed
+	// across the lifetime of a session. When the limit is reached the supervisor
+	// writes a hard-stop assistant message and returns without calling the runner.
+	// Zero means unlimited.
+	MaxDispatches int
 }
 
 // DefaultSystemPrompt is the base orchestrator prompt. BuildSystemPrompt appends the agent roster.
@@ -137,6 +143,33 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 
 	if err := w.writeIncomingChunks(ctx, sessionID, appTask.Payload); err != nil {
 		return nil, worker.MoveErrorf("supervisor: write chunks: %v", err)
+	}
+
+	if w.cfg.MaxDispatches > 0 {
+		count, err := sessionlog.CountDispatches(ctx, w.eq, sessionID)
+		if err != nil {
+			return nil, worker.RetryErrorf("supervisor: count dispatches: %v", err)
+		}
+		if count >= w.cfg.MaxDispatches {
+			stopMsg := fmt.Sprintf(
+				"This session has reached its dispatch limit (%d agents invoked). No further agents will be dispatched. Please review the work so far and start a new session if more is needed.",
+				w.cfg.MaxDispatches,
+			)
+			replyQueue := models.UserReplyQueue(session.ID)
+			resultTask := models.NewTask(replyQueue, appTask.SessionURI, map[string]any{
+				"from_agent": "supervisor",
+				"output":     stopMsg,
+			})
+			log.Printf("supervisor: session %s hit dispatch limit (%d), stopping", sessionID, w.cfg.MaxDispatches)
+			return []entroq.ModifyArg{
+				entroq.InsertingInto(replyQueue, entroq.WithValue(resultTask)),
+				task.Delete(),
+				sessionlog.AppendArg(sessionID, sessionlog.Chunk{
+					Type:    sessionlog.ChunkAssistantMessage,
+					Content: stopMsg,
+				}),
+			}, nil
+		}
 	}
 
 	transcript, err := w.buildTranscript(ctx, sessionID)

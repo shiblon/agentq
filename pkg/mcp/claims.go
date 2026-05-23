@@ -15,6 +15,7 @@ const (
 	claimTools    = "mcp_tools"
 	claimBranches = "mcp_branches"
 	claimReplyTo  = "mcp_reply_to"
+	claimDepth    = "mcp_depth"
 
 	defaultTokenTTL = time.Hour
 )
@@ -54,6 +55,11 @@ type Claims struct {
 	// reject the call. Optional in all other contexts.
 	ReplyTo string
 
+	// Depth is the current dispatch nesting level. The supervisor mints tokens
+	// at depth 0; each dispatch_to_agent call increments it in the child task's
+	// JWT. Used by the MCP server to enforce MaxDispatchDepth.
+	Depth int
+
 	// Expiry is when this token becomes invalid.
 	// If zero when passed to Mint, a default TTL of one hour is used.
 	Expiry time.Time
@@ -73,7 +79,8 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		Claim(claimSession, c.SessionID).
 		Claim(claimWorkdir, c.Workdir).
 		Claim(claimTools, c.ToolAllowlist).
-		Claim(claimBranches, c.AllowedBranches)
+		Claim(claimBranches, c.AllowedBranches).
+		Claim(claimDepth, c.Depth)
 	if c.ReplyTo != "" {
 		b = b.Claim(claimReplyTo, c.ReplyTo)
 	}
@@ -160,6 +167,14 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 	// ReplyTo is optional; absent means empty string.
 	replyTo, _ := private[claimReplyTo].(string)
 
+	// Depth is optional; absent or non-numeric means 0.
+	var depth int
+	if v, ok := private[claimDepth]; ok {
+		if f, ok := v.(float64); ok { // JSON numbers unmarshal as float64
+			depth = int(f)
+		}
+	}
+
 	return &Claims{
 		Issuer:          tok.Issuer(),
 		SessionID:       sessionID,
@@ -167,6 +182,7 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 		ToolAllowlist:   tools,
 		AllowedBranches: branches,
 		ReplyTo:         replyTo,
+		Depth:           depth,
 		Expiry:          tok.Expiration(),
 	}, nil
 }

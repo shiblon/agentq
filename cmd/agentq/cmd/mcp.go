@@ -59,6 +59,7 @@ func init() {
 	mcpServeCmd.Flags().Bool("insecure-skip-verification", false, "Skip JWT signature verification. Claims are still parsed and dynamic per-session. Never use in production.")
 	mcpServeCmd.Flags().Bool("dev-tools", false, "Enable development-only tools (e.g. echo). Never use in production.")
 	mcpServeCmd.Flags().String("queue-namespace", "agentq", "Prefix for agent queue names (dispatch_to_agent constructs <namespace>/<agent>/inbox). Only used when --eq-addr is set.")
+	mcpServeCmd.Flags().Int("max-dispatch-depth", 1, "Maximum dispatch nesting level (0 = unlimited). Default 1 prevents specialist agents from dispatching further.")
 
 	mcpKeygenCmd.Flags().String("out-dir", ".", "Directory to write private.jwk and public.jwks")
 	mcpKeygenCmd.Flags().String("algorithm", "ES256", "Signing algorithm: ES256 (ECDSA P-256, default) or RS256 (RSA 2048)")
@@ -133,7 +134,8 @@ func runMCPServe(cmd *cobra.Command, _ []string) error {
 	defer eq.Close()
 	cfg.EQ = eq
 	cfg.QueueNamespace, _ = cmd.Flags().GetString("queue-namespace")
-	log.Printf("mcp serve: orchestration tools enabled (namespace=%s)", cfg.QueueNamespace)
+	cfg.MaxDispatchDepth, _ = cmd.Flags().GetInt("max-dispatch-depth")
+	log.Printf("mcp serve: orchestration tools enabled (namespace=%s, max-dispatch-depth=%d)", cfg.QueueNamespace, cfg.MaxDispatchDepth)
 
 	srv, err := mcp.New(cfg)
 	if err != nil {

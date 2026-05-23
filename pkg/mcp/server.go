@@ -53,6 +53,11 @@ type Config struct {
 	// dispatch_to_agent constructs queues as <namespace>/<agent>/inbox.
 	// Defaults to "agentq" when EQ is set.
 	QueueNamespace string
+
+	// MaxDispatchDepth is the maximum nesting level allowed by dispatch_to_agent.
+	// A value of 1 means only the top-level supervisor (depth 0) may dispatch;
+	// specialists at depth 1 are refused. Zero means unlimited (no check).
+	MaxDispatchDepth int
 }
 
 type claimsContextKey struct{}
@@ -116,7 +121,7 @@ func New(cfg Config) (*Server, error) {
 		if ns == "" {
 			ns = "agentq"
 		}
-		tools = append(tools, AllOrchestrationTools(cfg.EQ, ns)...)
+		tools = append(tools, AllOrchestrationTools(cfg.EQ, ns, cfg.MaxDispatchDepth)...)
 	}
 	mcpSrv.AddTools(tools...)
 
