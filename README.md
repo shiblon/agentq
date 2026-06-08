@@ -4,6 +4,8 @@ Multi-agent orchestration built on security fundamentals that distributed
 systems worked out decades ago — least privilege, decomposition, explicit
 delegation, auditable communication paths — applied to AI agents.
 
+https://highentropy.com/posts/agentq-learnings/
+
 > **Status: experimental.** APIs and config formats will change.
 
 ---
