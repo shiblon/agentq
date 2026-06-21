@@ -43,7 +43,8 @@ agents:
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
     tools:
-      - "*"   # all available tools; use allowed_tools/blocked_tools in tasks to restrict
+      - "*"          # expands to file, git, go, and search tools
+      - run_command  # explicit: broad shell access needed for builds, tests, package managers
 
   # reviewer: read-only access; never writes files.
   - name: reviewer

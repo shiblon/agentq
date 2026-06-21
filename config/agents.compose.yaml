@@ -25,6 +25,7 @@ agents:
     mcp_addr: http://mcp:8081
     tools:
       - "*"
+      - run_command
 
   - name: reviewer
     queue: agentq/reviewer/inbox

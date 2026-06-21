@@ -100,6 +100,17 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	tools := agentqworker.ExpandTools(agent.Tools)
+
+	var systemPrompt string
+	if agent.PromptFile != "" {
+		b, err := os.ReadFile(agent.PromptFile)
+		if err != nil {
+			return fmt.Errorf("read prompt file %q for agent %q: %w", agent.PromptFile, agentName, err)
+		}
+		systemPrompt = string(b)
+		log.Printf("worker %s: loaded system prompt from %s", agentName, agent.PromptFile)
+	}
+
 	log.Printf("worker %s: claiming from %q, %d tools, runner=%s", agentName, agent.Queue, len(tools), agent.RunnerURL)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -112,14 +123,15 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	defer eq.Close()
 
 	workerCfg := agentqworker.Config{
-		Name:        agentName,
-		Description: agent.Description,
-		Tools:       tools,
-		PrivKey:     kp.Private,
-		Issuer:      issuer,
-		MCPAddr:     agent.MCPAddr,
-		RunnerURL:   agent.RunnerURL,
-		ReplyQueue:  replyQueue,
+		Name:         agentName,
+		Description:  agent.Description,
+		Tools:        tools,
+		PrivKey:      kp.Private,
+		Issuer:       issuer,
+		MCPAddr:      agent.MCPAddr,
+		RunnerURL:    agent.RunnerURL,
+		ReplyQueue:   replyQueue,
+		SystemPrompt: systemPrompt,
 	}
 	w := agentqworker.New(workerCfg, eq)
 

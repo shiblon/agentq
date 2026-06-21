@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/shiblon/agentq/pkg/approval"
 	"github.com/shiblon/agentq/pkg/config"
 	"github.com/shiblon/agentq/pkg/mcp"
 	"github.com/shiblon/agentq/pkg/models"
@@ -54,6 +55,8 @@ func init() {
 	supervisorServeCmd.Flags().String("prompt", "", "System prompt for the supervisor (overrides built-in default)")
 	supervisorServeCmd.Flags().String("prompt-file", "", "Path to a file containing the supervisor system prompt")
 	supervisorServeCmd.Flags().Int("max-dispatches", 20, "Maximum number of agent dispatches per session (0 = unlimited)")
+	supervisorServeCmd.Flags().String("provenance-key", "", "Base64 root key for verifying session provenance tokens (env: AGENTQ_PROVENANCE_KEY). Must match the key used by the API server.")
+	supervisorServeCmd.Flags().String("provenance-key-file", "", "File containing the base64 provenance root key (for secret rotation via Vault Agent or similar)")
 
 	_ = supervisorServeCmd.MarkFlagRequired("runner-url")
 	_ = supervisorServeCmd.MarkFlagRequired("mcp-addr")
@@ -71,6 +74,8 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 	prompt, _ := cmd.Flags().GetString("prompt")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
 	maxDispatches, _ := cmd.Flags().GetInt("max-dispatches")
+	provKey, _ := cmd.Flags().GetString("provenance-key")
+	provKeyFile, _ := cmd.Flags().GetString("provenance-key-file")
 
 	if promptFile != "" {
 		b, err := os.ReadFile(promptFile)
@@ -112,6 +117,25 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		kp = &mcp.KeyPair{Private: key}
 	}
 
+	if provKeyFile != "" {
+		b, err := os.ReadFile(provKeyFile)
+		if err != nil {
+			return fmt.Errorf("read provenance key file: %w", err)
+		}
+		provKey = string(b)
+	}
+	var provVerifier *approval.ProvenanceVerifier
+	if provKey != "" {
+		v, err := approval.NewProvenanceVerifier(provKey)
+		if err != nil {
+			return fmt.Errorf("create provenance verifier: %w", err)
+		}
+		provVerifier = v
+		log.Printf("supervisor: session provenance verification enabled")
+	} else {
+		log.Printf("supervisor: session provenance verification disabled (set --provenance-key to enable)")
+	}
+
 	log.Printf("supervisor: claiming from %q, runner=%s, mcp=%s, tools=%v", queue, runnerURL, mcpAddr, tools)
 
 	// Load agent roster and build system prompt.
@@ -125,14 +149,15 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	workerCfg := supervisor.Config{
-		Issuer:         issuer,
-		PrivKey:        kp.Private,
-		MCPAddr:        mcpAddr,
-		RunnerURL:      runnerURL,
-		Tools:          tools,
-		DefaultWorkdir: defaultWorkdir,
-		SystemPrompt:   supervisor.BuildSystemPrompt(prompt, agentInfos),
-		MaxDispatches:  maxDispatches,
+		Issuer:             issuer,
+		PrivKey:            kp.Private,
+		MCPAddr:            mcpAddr,
+		RunnerURL:          runnerURL,
+		Tools:              tools,
+		DefaultWorkdir:     defaultWorkdir,
+		SystemPrompt:       supervisor.BuildSystemPrompt(prompt, agentInfos),
+		MaxDispatches:      maxDispatches,
+		ProvenanceVerifier: provVerifier,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

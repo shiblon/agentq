@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/shiblon/agentq/pkg/approval"
 	"github.com/shiblon/agentq/pkg/mcp"
 	"github.com/shiblon/agentq/pkg/models"
 	"github.com/shiblon/agentq/pkg/runner"
@@ -59,6 +60,11 @@ type Config struct {
 	// writes a hard-stop assistant message and returns without calling the runner.
 	// Zero means unlimited.
 	MaxDispatches int
+
+	// ProvenanceVerifier, if set, verifies the session's provenance token before
+	// each task is processed. Tasks whose sessions lack a valid token are moved
+	// to the error queue. When nil, provenance checking is disabled (opt-in).
+	ProvenanceVerifier *approval.ProvenanceVerifier
 }
 
 // DefaultSystemPrompt is the base orchestrator prompt. BuildSystemPrompt appends the agent roster.
@@ -140,6 +146,12 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	}
 
 	sessionID := strings.TrimPrefix(appTask.SessionURI, "doc:sessions/")
+
+	if w.cfg.ProvenanceVerifier != nil {
+		if err := w.cfg.ProvenanceVerifier.Verify(session.Meta.ProvenanceToken, sessionID); err != nil {
+			return nil, worker.MoveErrorf("supervisor: provenance check failed for session %s: %v", sessionID, err)
+		}
+	}
 
 	if err := w.writeIncomingChunks(ctx, sessionID, appTask.Payload); err != nil {
 		return nil, worker.MoveErrorf("supervisor: write chunks: %v", err)

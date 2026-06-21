@@ -23,6 +23,18 @@ func AllTools() []server.ServerTool {
 	return tools
 }
 
+// AllSafeTools returns the tools appropriate for wildcard ("*") expansion:
+// file, git, go, and search tools. run_command is excluded because it grants
+// broad shell execution and must be granted explicitly in an agent's tool list.
+func AllSafeTools() []server.ServerTool {
+	var tools []server.ServerTool
+	tools = append(tools, AllFileTools()...)
+	tools = append(tools, AllGitTools()...)
+	tools = append(tools, AllGoTools()...)
+	tools = append(tools, AllSearchTools()...)
+	return tools
+}
+
 // optionalStringArg extracts an optional string argument from a tool request.
 // Returns ("", false) if the argument is absent or not a string.
 func optionalStringArg(req mcplib.CallToolRequest, name string) (string, bool) {

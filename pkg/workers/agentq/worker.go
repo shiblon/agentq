@@ -50,6 +50,11 @@ type Config struct {
 
 	// ReplyQueue is the EntroQ queue to post results to.
 	ReplyQueue string
+
+	// SystemPrompt, if non-empty, is used as the agent's system prompt instead
+	// of the generated default. The effective tool list is appended so the LLM
+	// knows what MCP tools are available. Populated from prompt_file in agents.yaml.
+	SystemPrompt string
 }
 
 // Payload is the typed content of an AgentQ task's Payload field.
@@ -149,7 +154,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	output, err := w.callRunner(ctx, runner.RunRequest{
 		JWT:          jwt,
 		Messages:     payload.Messages,
-		SystemPrompt: buildSystemPrompt(w.cfg.Name, w.cfg.Description, effectiveTools),
+		SystemPrompt: w.systemPrompt(effectiveTools),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: runner: %w", w.cfg.Name, err)
@@ -226,24 +231,28 @@ func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string,
 	return result.Output, nil
 }
 
-// buildSystemPrompt constructs the agent system prompt from its identity and tool list.
-func buildSystemPrompt(name, description string, tools []string) string {
-	var sb strings.Builder
-	sb.WriteString("You are the ")
-	sb.WriteString(name)
-	sb.WriteString(" agent.")
-	if description != "" {
-		sb.WriteString(" Your job: ")
-		sb.WriteString(description)
-	}
-	if len(tools) > 0 {
-		sb.WriteString("\n\nAvailable MCP tools: ")
-		sb.WriteString(strings.Join(tools, ", "))
-		sb.WriteString(".\nUse only these tools. Do not use any other tools.")
+// systemPrompt returns the system prompt for this agent. If Config.SystemPrompt
+// is set (loaded from prompt_file), it is used as the base and the effective
+// tool list is appended. Otherwise the generic identity prompt is generated.
+func (w *Worker) systemPrompt(effectiveTools []string) string {
+	var base string
+	if w.cfg.SystemPrompt != "" {
+		base = w.cfg.SystemPrompt
 	} else {
-		sb.WriteString("\n\nYou have no MCP tools available. Respond using only your own knowledge.")
+		var sb strings.Builder
+		sb.WriteString("You are the ")
+		sb.WriteString(w.cfg.Name)
+		sb.WriteString(" agent.")
+		if w.cfg.Description != "" {
+			sb.WriteString(" Your job: ")
+			sb.WriteString(w.cfg.Description)
+		}
+		base = sb.String()
 	}
-	return sb.String()
+	if len(effectiveTools) > 0 {
+		return base + "\n\nAvailable MCP tools: " + strings.Join(effectiveTools, ", ") + ".\nUse only these tools. Do not use any other tools."
+	}
+	return base + "\n\nYou have no MCP tools available. Respond using only your own knowledge."
 }
 
 // applyAllowed narrows tools to the intersection with allowed.
@@ -275,21 +284,29 @@ func applyBlocks(tools, blocked []string) []string {
 	return result
 }
 
-// ExpandTools resolves the ["*"] wildcard to the full set of MCP file tool
-// names. Call this when building a Config from agents.yaml before passing
-// Tools to the worker. An empty slice is returned as-is (fail-closed).
+// ExpandTools resolves the ["*"] wildcard to the safe default tool set:
+// file, git, go, and search tools. run_command is excluded and must be
+// listed explicitly. Non-wildcard lists are returned as-is (fail-closed on empty).
 func ExpandTools(tools []string) []string {
+	hasWildcard := false
+	var explicit []string
 	for _, t := range tools {
 		if t == "*" {
-			all := mcp.AllFileTools()
-			names := make([]string, len(all))
-			for i, tool := range all {
-				names[i] = tool.Tool.Name
-			}
-			return names
+			hasWildcard = true
+		} else {
+			explicit = append(explicit, t)
 		}
 	}
-	return tools
+	if !hasWildcard {
+		return tools
+	}
+	all := mcp.AllSafeTools()
+	names := make([]string, 0, len(all)+len(explicit))
+	for _, tool := range all {
+		names = append(names, tool.Tool.Name)
+	}
+	names = append(names, explicit...)
+	return names
 }
 
 // remarshal round-trips v through JSON to populate dst. Used to convert a
