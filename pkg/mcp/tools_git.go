@@ -25,7 +25,7 @@ func gitStatusTool() server.ServerTool {
 	def := mcplib.NewTool("git_status",
 		mcplib.WithDescription("Show the working tree status."),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_status",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_status",
 		func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			return runInWorkdir(ctx, claimsFromContext(ctx), "git", "status")
 		})}
@@ -38,7 +38,7 @@ func gitDiffTool() server.ServerTool {
 			mcplib.Description("Optional git diff arguments, e.g. '--staged' or a file path"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_diff",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_diff",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			args := []string{"diff"}
 			if extra, ok := optionalStringArg(req, "args"); ok {
@@ -56,7 +56,7 @@ func gitAddTool() server.ServerTool {
 			mcplib.Description("File path or '.' for all"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_add",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_add",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx)
 			path, err := req.RequireString("path")
@@ -86,7 +86,7 @@ func gitCommitTool() server.ServerTool {
 			mcplib.Description("Commit message"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_commit",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_commit",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			msg, err := req.RequireString("message")
 			if err != nil {
@@ -100,7 +100,7 @@ func gitLogTool() server.ServerTool {
 	def := mcplib.NewTool("git_log",
 		mcplib.WithDescription("Show recent commit history (last 20 commits, one line each)."),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_log",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_log",
 		func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			return runInWorkdir(ctx, claimsFromContext(ctx), "git", "log", "--oneline", "-20")
 		})}
@@ -112,7 +112,7 @@ func gitPushTool() server.ServerTool {
 		mcplib.WithString("remote", mcplib.Required(), mcplib.Description("Remote name, e.g. 'origin'")),
 		mcplib.WithString("branch", mcplib.Required(), mcplib.Description("Branch to push to")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_push",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_push",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx)
 			remote, err := req.RequireString("remote")
@@ -136,7 +136,7 @@ func gitPullTool() server.ServerTool {
 		mcplib.WithString("remote", mcplib.Required(), mcplib.Description("Remote name, e.g. 'origin'")),
 		mcplib.WithString("branch", mcplib.Required(), mcplib.Description("Branch to pull from")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("git_pull",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("git_pull",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx)
 			remote, err := req.RequireString("remote")

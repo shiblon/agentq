@@ -13,11 +13,6 @@ const (
 	EnvWorkspaceSelf = "AGENTQ_SELF"
 )
 
-// WildcardTools is the sentinel value meaning "all available tools".
-// Use in Agent.Tools to explicitly grant the full tool set.
-// Empty Tools is fail-closed (no tools permitted).
-const WildcardTools = "*"
-
 // Agent defines a specialist agent persona.
 type Agent struct {
 	Name        string `yaml:"name"        json:"name"`
@@ -31,10 +26,13 @@ type Agent struct {
 	// MCPAddr is the base URL of the MCP pool server this agent connects to.
 	MCPAddr string `yaml:"mcp_addr,omitempty" json:"mcp_addr,omitempty"`
 
-	// Tools is the ceiling of MCP tools this agent type may use.
-	// Use ["*"] to permit all available tools.
-	// An empty list (or absent field) means no tools are permitted (fail-closed).
-	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	// Legs is the ceiling of what this agent type may do, named from
+	// "untrusted", "private" and "mutate". At most two, because holding all
+	// three leaves a prompt injection unbounded. The tools this admits are
+	// derived from it, so there is no tool list to keep in step.
+	//
+	// An empty list (or absent field) permits nothing (fail-closed).
+	Legs []string `yaml:"legs,omitempty" json:"legs,omitempty"`
 }
 
 // WorkspaceConfig describes the shared file workspace for agent workers.

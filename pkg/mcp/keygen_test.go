@@ -79,10 +79,10 @@ func TestWriteAndLoadPrivateKey(t *testing.T) {
 func roundTripMintParse(t *testing.T, kp *KeyPair, issuer string) {
 	t.Helper()
 	raw, err := Mint(kp.Private, Claims{
-		Issuer:        issuer,
-		SessionID:     "test-session",
-		Workdir:       "/work",
-		ToolAllowlist: []string{"read_file"},
+		Issuer:    issuer,
+		SessionID: "test-session",
+		Workdir:   "/work",
+		Legs:      Legs(Untrusted, Private),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)

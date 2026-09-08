@@ -22,7 +22,7 @@ func goBuildTool() server.ServerTool {
 		mcplib.WithDescription("Build Go packages. Defaults to './...' (all packages in the module)."),
 		mcplib.WithString("packages", mcplib.Description("Package pattern, e.g. './...' or './pkg/foo'")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("go_build",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("go_build",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			pkgs := "./..."
 			if p, ok := optionalStringArg(req, "packages"); ok {
@@ -38,7 +38,7 @@ func goTestTool() server.ServerTool {
 		mcplib.WithString("packages", mcplib.Description("Package pattern, e.g. './...' or './pkg/foo'")),
 		mcplib.WithString("run", mcplib.Description("Regex to filter test names, e.g. 'TestFoo'")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("go_test",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("go_test",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			args := []string{"test", "-count=1"}
 			if r, ok := optionalStringArg(req, "run"); ok {
@@ -58,7 +58,7 @@ func goFmtTool() server.ServerTool {
 		mcplib.WithDescription("Format Go source files. Defaults to all files in the module."),
 		mcplib.WithString("packages", mcplib.Description("Package pattern")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("go_fmt",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("go_fmt",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			pkgs := "./..."
 			if p, ok := optionalStringArg(req, "packages"); ok {
@@ -73,7 +73,7 @@ func goVetTool() server.ServerTool {
 		mcplib.WithDescription("Run go vet to check for common mistakes. Defaults to './...'."),
 		mcplib.WithString("packages", mcplib.Description("Package pattern")),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("go_vet",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("go_vet",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			pkgs := "./..."
 			if p, ok := optionalStringArg(req, "packages"); ok {

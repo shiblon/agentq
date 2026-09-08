@@ -104,13 +104,13 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tQUEUE\tTOOLS\tDESCRIPTION")
+	fmt.Fprintln(w, "NAME\tQUEUE\tLEGS\tDESCRIPTION")
 	for _, a := range cfg.Agents {
-		tools := "none"
-		if len(a.Tools) > 0 {
-			tools = strings.Join(a.Tools, ",")
+		legs := "none"
+		if len(a.Legs) > 0 {
+			legs = strings.Join(a.Legs, ",")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Queue, tools, a.Description)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Queue, legs, a.Description)
 	}
 	return w.Flush()
 }

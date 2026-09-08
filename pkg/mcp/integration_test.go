@@ -32,10 +32,10 @@ func (s *testSession) callTool(t *testing.T, name string, args map[string]any) *
 	return result
 }
 
-// newTestSession starts a Server backed by a temp directory, mints a JWT with
-// the given tool allowlist, and returns a connected, initialized client.
+// newTestSession starts a Server backed by a temp directory, mints a JWT
+// granting legs, and returns a connected, initialized client.
 // All cleanup is registered with t.Cleanup.
-func newTestSession(t *testing.T, allowlist []string) *testSession {
+func newTestSession(t *testing.T, legs LegSet) *testSession {
 	t.Helper()
 	priv, pubSet := testKeyPair(t)
 	dir := t.TempDir()
@@ -48,10 +48,10 @@ func newTestSession(t *testing.T, allowlist []string) *testSession {
 	t.Cleanup(ts.Close)
 
 	tok, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     t.Name(),
-		Workdir:       dir,
-		ToolAllowlist: allowlist,
+		Issuer:    "agentq",
+		SessionID: t.Name(),
+		Workdir:   dir,
+		Legs:      legs,
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -85,26 +85,50 @@ func newTestSession(t *testing.T, allowlist []string) *testSession {
 
 // -- tools/list ---------------------------------------------------------------
 
-func TestIntegration_ToolsListFilteredByAllowlist(t *testing.T) {
-	sess := newTestSession(t, []string{"read_file"})
+func TestIntegration_ToolsListFilteredByLegs(t *testing.T) {
+	// Legs, not names, decide visibility: an ingesting session sees every
+	// reading tool and no mutating one, without either list being written
+	// down anywhere.
+	sess := newTestSession(t, Legs(Untrusted, Private))
 
 	result, err := sess.client.ListTools(sess.ctx, mcplib.ListToolsRequest{})
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "read_file" {
-		names := make([]string, len(result.Tools))
-		for i, tool := range result.Tools {
-			names[i] = tool.Name
-		}
-		t.Errorf("tools = %v, want [read_file]", names)
+	got := map[string]bool{}
+	for _, tool := range result.Tools {
+		got[tool.Name] = true
 	}
+	for _, want := range []string{"read_file", "list_directory", "grep", "git_diff"} {
+		if !got[want] {
+			t.Errorf("%q missing from tools/list: %v", want, toolNamesOf(result.Tools))
+		}
+	}
+	for _, unwanted := range []string{"write_file", "git_push", "create_directory"} {
+		if got[unwanted] {
+			t.Errorf("%q visible to a session without the mutate leg", unwanted)
+		}
+	}
+	// Ungrantable tools are not registered at all, so no legs reveal them.
+	for _, never := range []string{"go_test", "go_build", "git_pull", "run_command"} {
+		if got[never] {
+			t.Errorf("%q is registered but carries more legs than any session may hold", never)
+		}
+	}
+}
+
+func toolNamesOf(tools []mcplib.Tool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	return names
 }
 
 // -- read_file ----------------------------------------------------------------
 
 func TestIntegration_ReadFile_Success(t *testing.T) {
-	sess := newTestSession(t, []string{"read_file"})
+	sess := newTestSession(t, Legs(Untrusted, Private))
 
 	if err := os.WriteFile(filepath.Join(sess.dir, "hello.txt"), []byte("world"), 0644); err != nil {
 		t.Fatalf("setup: %v", err)
@@ -119,19 +143,20 @@ func TestIntegration_ReadFile_Success(t *testing.T) {
 	}
 }
 
-func TestIntegration_ReadFile_NotInAllowlist(t *testing.T) {
-	sess := newTestSession(t, []string{"list_directory"})
+func TestIntegration_ReadFile_LegsNotCovered(t *testing.T) {
+	// A mutating session holds private+mutate, so it cannot ingest content.
+	sess := newTestSession(t, Legs(Private, Mutate))
 
 	result := sess.callTool(t, "read_file", map[string]any{"path": "/anything.txt"})
 	if !result.IsError {
-		t.Error("expected tool error for read_file not in allowlist")
+		t.Error("expected tool error: read_file needs the untrusted leg")
 	}
 }
 
 // -- write_file ---------------------------------------------------------------
 
 func TestIntegration_WriteFile_Success(t *testing.T) {
-	sess := newTestSession(t, []string{"write_file"})
+	sess := newTestSession(t, Legs(Private, Mutate))
 
 	result := sess.callTool(t, "write_file", map[string]any{
 		"path":    "/output/result.txt",
@@ -152,11 +177,11 @@ func TestIntegration_WriteFile_Success(t *testing.T) {
 }
 
 func TestIntegration_WriteFile_NotInAllowlist(t *testing.T) {
-	sess := newTestSession(t, []string{"read_file"})
+	sess := newTestSession(t, Legs(Untrusted, Private))
 
 	result := sess.callTool(t, "write_file", map[string]any{"path": "/out.txt", "content": "blocked"})
 	if !result.IsError {
-		t.Error("expected tool error for write_file not in allowlist")
+		t.Error("expected tool error: write_file needs the mutate leg")
 	}
 	// Confirm nothing was written.
 	if _, err := os.Stat(filepath.Join(sess.dir, "out.txt")); !os.IsNotExist(err) {
@@ -167,7 +192,7 @@ func TestIntegration_WriteFile_NotInAllowlist(t *testing.T) {
 // -- list_directory -----------------------------------------------------------
 
 func TestIntegration_ListDirectory_Success(t *testing.T) {
-	sess := newTestSession(t, []string{"list_directory"})
+	sess := newTestSession(t, Legs(Untrusted, Private))
 
 	if err := os.WriteFile(filepath.Join(sess.dir, "a.go"), []byte(""), 0644); err != nil {
 		t.Fatalf("setup: %v", err)
@@ -192,7 +217,7 @@ func TestIntegration_ListDirectory_Success(t *testing.T) {
 // -- create_directory ---------------------------------------------------------
 
 func TestIntegration_CreateDirectory_Success(t *testing.T) {
-	sess := newTestSession(t, []string{"create_directory"})
+	sess := newTestSession(t, Legs(Private, Mutate))
 
 	result := sess.callTool(t, "create_directory", map[string]any{"path": "/new/nested/dir"})
 	if result.IsError {

@@ -49,11 +49,11 @@ func TestMintParse_RoundTrip(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	want := Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-123",
-		Workdir:       "/var/agentq/sessions/sess-123",
-		ToolAllowlist: []string{"read_file", "write_file", "list_directory"},
-		Expiry:        time.Now().Add(30 * time.Minute).Truncate(time.Second),
+		Issuer:    "agentq",
+		SessionID: "sess-123",
+		Workdir:   "/var/agentq/sessions/sess-123",
+		Legs:      Legs(Untrusted, Private),
+		Expiry:    time.Now().Add(30 * time.Minute).Truncate(time.Second),
 	}
 
 	raw, err := Mint(priv, want)
@@ -75,27 +75,22 @@ func TestMintParse_RoundTrip(t *testing.T) {
 	if got.Workdir != want.Workdir {
 		t.Errorf("Workdir = %q, want %q", got.Workdir, want.Workdir)
 	}
-	if len(got.ToolAllowlist) != len(want.ToolAllowlist) {
-		t.Fatalf("ToolAllowlist length = %d, want %d", len(got.ToolAllowlist), len(want.ToolAllowlist))
-	}
-	for i, tool := range want.ToolAllowlist {
-		if got.ToolAllowlist[i] != tool {
-			t.Errorf("ToolAllowlist[%d] = %q, want %q", i, got.ToolAllowlist[i], tool)
-		}
+	if got.Legs != want.Legs {
+		t.Errorf("Legs = %s, want %s", got.Legs, want.Legs)
 	}
 	if !got.Expiry.Equal(want.Expiry) {
 		t.Errorf("Expiry = %v, want %v", got.Expiry, want.Expiry)
 	}
 }
 
-func TestMintParse_EmptyToolAllowlist(t *testing.T) {
+func TestMintParse_NoLegs(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -105,8 +100,8 @@ func TestMintParse_EmptyToolAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(got.ToolAllowlist) != 0 {
-		t.Errorf("ToolAllowlist = %v, want empty", got.ToolAllowlist)
+	if got.Legs != Legs() {
+		t.Errorf("Legs = %s, want none", got.Legs)
 	}
 }
 
@@ -114,10 +109,10 @@ func TestMintParse_EmptyWorkdir(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "",
-		ToolAllowlist: []string{"read_file"},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "",
+		Legs:      Legs(Untrusted, Private),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -137,10 +132,10 @@ func TestMintParse_DefaultExpiry(t *testing.T) {
 
 	before := time.Now()
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 		// Expiry zero: should default to ~1 hour
 	})
 	if err != nil {
@@ -167,10 +162,10 @@ func TestMintParse_DefaultExpiry(t *testing.T) {
 func TestParseInsecure_RoundTrip(t *testing.T) {
 	priv, _ := testKeyPair(t)
 	want := Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-insecure",
-		Workdir:       "/var/work",
-		ToolAllowlist: []string{"read_file", "list_directory"},
+		Issuer:    "agentq",
+		SessionID: "sess-insecure",
+		Workdir:   "/var/work",
+		Legs:      Legs(Untrusted, Private),
 	}
 	raw, err := Mint(priv, want)
 	if err != nil {
@@ -186,8 +181,8 @@ func TestParseInsecure_RoundTrip(t *testing.T) {
 	if got.Workdir != want.Workdir {
 		t.Errorf("Workdir = %q, want %q", got.Workdir, want.Workdir)
 	}
-	if len(got.ToolAllowlist) != len(want.ToolAllowlist) {
-		t.Fatalf("ToolAllowlist len = %d, want %d", len(got.ToolAllowlist), len(want.ToolAllowlist))
+	if got.Legs != want.Legs {
+		t.Fatalf("Legs = %s, want %s", got.Legs, want.Legs)
 	}
 }
 
@@ -196,10 +191,10 @@ func TestParseInsecure_AcceptsWrongKey(t *testing.T) {
 	// different key (the whole point of the insecure mode).
 	priv, _ := testKeyPair(t)
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -217,11 +212,11 @@ func TestParseInsecure_AcceptsWrongKey(t *testing.T) {
 func TestParseInsecure_AcceptsExpired(t *testing.T) {
 	priv, _ := testKeyPair(t)
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
-		Expiry:        time.Now().Add(-time.Hour),
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
+		Expiry:    time.Now().Add(-time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -284,10 +279,10 @@ func TestParse_WrongIssuer(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -303,11 +298,11 @@ func TestParse_ExpiredToken(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
-		Expiry:        time.Now().Add(-time.Minute),
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
+		Expiry:    time.Now().Add(-time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -324,10 +319,10 @@ func TestParse_BadSignature(t *testing.T) {
 	_, otherPubSet := testKeyPair(t) // different key pair
 
 	raw, err := Mint(priv, Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)

@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/shiblon/entroq"
 )
 
@@ -110,7 +110,7 @@ func New(cfg Config) (*Server, error) {
 	mcpSrv := server.NewMCPServer(
 		"agentq-mcp", "1.0.0",
 		server.WithToolCapabilities(true),
-		server.WithToolFilter(s.allowlistFilter),
+		server.WithToolFilter(s.legFilter),
 	)
 	tools := AllTools()
 	if cfg.DevTools {
@@ -122,6 +122,9 @@ func New(cfg Config) (*Server, error) {
 			ns = "agentq"
 		}
 		tools = append(tools, AllOrchestrationTools(cfg.EQ, ns, cfg.MaxDispatchDepth)...)
+	}
+	if err := validateToolLegs(tools); err != nil {
+		return nil, fmt.Errorf("mcp: %w", err)
 	}
 	mcpSrv.AddTools(tools...)
 
@@ -206,20 +209,21 @@ func (s *Server) jwtMiddlewareHandler(skipVerification bool, next http.Handler) 
 	})
 }
 
-// allowlistFilter is registered with WithToolFilter. It restricts the tools
-// returned by tools/list to those named in the session's ToolAllowlist.
-func (s *Server) allowlistFilter(ctx context.Context, tools []mcplib.Tool) []mcplib.Tool {
+// legFilter is registered with WithToolFilter. It restricts tools/list to
+// those the session's legs cover, which is the same rule withLegCheck applies
+// per call: this is the visibility half, that one is the enforcement half.
+func (s *Server) legFilter(ctx context.Context, tools []mcplib.Tool) []mcplib.Tool {
 	c := claimsFromContext(ctx)
 	if c == nil {
 		return nil
 	}
-	allowed := make(map[string]bool, len(c.ToolAllowlist))
-	for _, name := range c.ToolAllowlist {
-		allowed[name] = true
-	}
-	filtered := make([]mcplib.Tool, 0, len(c.ToolAllowlist))
+	filtered := make([]mcplib.Tool, 0, len(tools))
 	for _, t := range tools {
-		if allowed[t.Name] {
+		need, ok := toolLegs[t.Name]
+		if !ok {
+			continue // untagged tools are never visible; New rejects them anyway
+		}
+		if c.Legs.Contains(need) {
 			filtered = append(filtered, t)
 		}
 	}

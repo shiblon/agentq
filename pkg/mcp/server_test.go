@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,10 +28,10 @@ func (h *handlerCapture) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
 func TestJWTMiddleware_ValidToken_PassesThrough(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 	c := Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{"read_file"},
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(Untrusted, Private),
 	}
 	tok, err := Mint(priv, c)
 	if err != nil {
@@ -79,11 +80,11 @@ func TestJWTMiddleware_MissingToken_Returns401(t *testing.T) {
 func TestJWTMiddleware_ExpiredToken_Returns401(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 	c := Claims{
-		Issuer:        "agentq",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
-		Expiry:        time.Now().Add(-time.Minute),
+		Issuer:    "agentq",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
+		Expiry:    time.Now().Add(-time.Minute),
 	}
 	tok, err := Mint(priv, c)
 	if err != nil {
@@ -109,10 +110,10 @@ func TestJWTMiddleware_ExpiredToken_Returns401(t *testing.T) {
 func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 	c := Claims{
-		Issuer:        "other-issuer",
-		SessionID:     "sess-1",
-		Workdir:       "/work",
-		ToolAllowlist: []string{},
+		Issuer:    "other-issuer",
+		SessionID: "sess-1",
+		Workdir:   "/work",
+		Legs:      Legs(),
 	}
 	tok, err := Mint(priv, c)
 	if err != nil {
@@ -167,51 +168,52 @@ func makeTools(names ...string) []mcplib.Tool {
 	return tools
 }
 
-func TestAllowlistFilter_FiltersToAllowlist(t *testing.T) {
+func TestLegFilter_KeepsOnlyCoveredTools(t *testing.T) {
 	s := &Server{}
-	c := &Claims{ToolAllowlist: []string{"read_file", "write_file"}}
+	c := &Claims{Legs: Legs(Untrusted, Private)}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
+	// delete_file has no leg tag, so it is never visible whatever the legs.
 	all := makeTools("read_file", "write_file", "delete_file", "list_directory")
-	got := s.allowlistFilter(ctx, all)
+	got := toolNames(s.legFilter(ctx, all))
 
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2; tools = %v", len(got), toolNames(got))
+	want := []string{"read_file", "list_directory"}
+	if len(got) != len(want) {
+		t.Fatalf("tools = %v, want %v", got, want)
 	}
-	for _, tool := range got {
-		if tool.Name != "read_file" && tool.Name != "write_file" {
-			t.Errorf("unexpected tool %q in filtered result", tool.Name)
+	for _, name := range want {
+		if !slices.Contains(got, name) {
+			t.Errorf("%q missing from %v", name, got)
 		}
 	}
 }
 
-func TestAllowlistFilter_EmptyAllowlist_ReturnsEmpty(t *testing.T) {
+func TestLegFilter_NoLegs_ReturnsEmpty(t *testing.T) {
 	s := &Server{}
-	c := &Claims{ToolAllowlist: []string{}}
+	c := &Claims{Legs: Legs()}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
-	got := s.allowlistFilter(ctx, makeTools("read_file", "write_file"))
+	got := s.legFilter(ctx, makeTools("read_file", "write_file"))
 	if len(got) != 0 {
 		t.Errorf("len = %d, want 0", len(got))
 	}
 }
 
-func TestAllowlistFilter_NoClaims_ReturnsNil(t *testing.T) {
+func TestLegFilter_NoClaims_ReturnsNil(t *testing.T) {
 	s := &Server{}
-	got := s.allowlistFilter(context.Background(), makeTools("read_file"))
+	got := s.legFilter(context.Background(), makeTools("read_file"))
 	if got != nil {
 		t.Errorf("expected nil, got %v", got)
 	}
 }
 
-func TestAllowlistFilter_AllowlistSupersetOfTools(t *testing.T) {
+func TestLegFilter_MutatingSessionCannotIngest(t *testing.T) {
 	s := &Server{}
-	c := &Claims{ToolAllowlist: []string{"read_file", "write_file", "nonexistent"}}
+	c := &Claims{Legs: Legs(Private, Mutate)}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
-	// Only read_file is actually registered; nonexistent is in allowlist but not in tools.
-	got := s.allowlistFilter(ctx, makeTools("read_file"))
-	if len(got) != 1 || got[0].Name != "read_file" {
-		t.Errorf("got %v, want [read_file]", toolNames(got))
+	got := toolNames(s.legFilter(ctx, makeTools("read_file", "write_file")))
+	if len(got) != 1 || got[0] != "write_file" {
+		t.Errorf("got %v, want [write_file]", got)
 	}
 }

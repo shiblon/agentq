@@ -29,11 +29,11 @@ func readFileTool() server.ServerTool {
 			mcplib.Description("File path, e.g. /src/main.go or src/main.go"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("read_file", readFileHandler)}
+	return server.ServerTool{Tool: def, Handler: withLegCheck("read_file", readFileHandler)}
 }
 
 func readFileHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	c := claimsFromContext(ctx) // non-nil guaranteed by withAllowlistCheck
+	c := claimsFromContext(ctx) // non-nil guaranteed by withLegCheck
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
@@ -61,11 +61,11 @@ func writeFileTool() server.ServerTool {
 			mcplib.Description("Content to write"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("write_file", writeFileHandler)}
+	return server.ServerTool{Tool: def, Handler: withLegCheck("write_file", writeFileHandler)}
 }
 
 func writeFileHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	c := claimsFromContext(ctx) // non-nil guaranteed by withAllowlistCheck
+	c := claimsFromContext(ctx) // non-nil guaranteed by withLegCheck
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
@@ -95,11 +95,11 @@ func listDirectoryTool() server.ServerTool {
 			mcplib.Description("Directory path"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("list_directory", listDirectoryHandler)}
+	return server.ServerTool{Tool: def, Handler: withLegCheck("list_directory", listDirectoryHandler)}
 }
 
 func listDirectoryHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	c := claimsFromContext(ctx) // non-nil guaranteed by withAllowlistCheck
+	c := claimsFromContext(ctx) // non-nil guaranteed by withLegCheck
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
@@ -131,11 +131,11 @@ func createDirectoryTool() server.ServerTool {
 			mcplib.Description("Directory path to create"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("create_directory", createDirectoryHandler)}
+	return server.ServerTool{Tool: def, Handler: withLegCheck("create_directory", createDirectoryHandler)}
 }
 
 func createDirectoryHandler(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	c := claimsFromContext(ctx) // non-nil guaranteed by withAllowlistCheck
+	c := claimsFromContext(ctx) // non-nil guaranteed by withLegCheck
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil

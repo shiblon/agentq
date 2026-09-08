@@ -11,12 +11,12 @@ import (
 )
 
 // sessionCtx returns a context with Claims set, suitable for tool handler tests.
-func sessionCtx(workdir string, tools ...string) context.Context {
+func sessionCtx(workdir string, legs LegSet) context.Context {
 	c := &Claims{
-		Issuer:        "agentq",
-		SessionID:     "test-sess",
-		Workdir:       workdir,
-		ToolAllowlist: tools,
+		Issuer:    "agentq",
+		SessionID: "test-sess",
+		Workdir:   workdir,
+		Legs:      legs,
 	}
 	return context.WithValue(context.Background(), claimsContextKey{}, c)
 }
@@ -107,9 +107,9 @@ func TestChrootPath_WorkdirItself(t *testing.T) {
 // -- withAllowlistCheck tests -------------------------------------------------
 
 func TestAllowlistCheck_Permitted(t *testing.T) {
-	ctx := sessionCtx("/work", "read_file")
+	ctx := sessionCtx("/work", Legs(Untrusted, Private))
 	called := false
-	wrapped := withAllowlistCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	wrapped := withLegCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		called = true
 		return mcplib.NewToolResultText("ok"), nil
 	})
@@ -120,9 +120,9 @@ func TestAllowlistCheck_Permitted(t *testing.T) {
 }
 
 func TestAllowlistCheck_NotPermitted(t *testing.T) {
-	ctx := sessionCtx("/work", "list_directory") // read_file not in list
+	ctx := sessionCtx("/work", Legs(Private, Mutate)) // a mutating session may not ingest
 	called := false
-	wrapped := withAllowlistCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	wrapped := withLegCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		called = true
 		return mcplib.NewToolResultText("ok"), nil
 	})
@@ -139,7 +139,7 @@ func TestAllowlistCheck_NotPermitted(t *testing.T) {
 }
 
 func TestAllowlistCheck_NoClaims(t *testing.T) {
-	wrapped := withAllowlistCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	wrapped := withLegCheck("read_file", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		return mcplib.NewToolResultText("ok"), nil
 	})
 	r, err := wrapped(context.Background(), mcplib.CallToolRequest{})
@@ -158,7 +158,7 @@ func TestReadFile_Success(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello world"), 0644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	ctx := sessionCtx(dir, "read_file")
+	ctx := sessionCtx(dir, Legs(Untrusted, Private))
 	r, err := callTool(ctx, readFileHandler, map[string]any{"path": "/hello.txt"})
 	if err != nil || isError(r) {
 		t.Fatalf("unexpected error; err=%v result=%v", err, resultText(r))
@@ -169,7 +169,7 @@ func TestReadFile_Success(t *testing.T) {
 }
 
 func TestReadFile_NotFound(t *testing.T) {
-	ctx := sessionCtx(t.TempDir(), "read_file")
+	ctx := sessionCtx(t.TempDir(), Legs(Untrusted, Private))
 	r, err := callTool(ctx, readFileHandler, map[string]any{"path": "/missing.txt"})
 	if err != nil {
 		t.Fatalf("unexpected Go error: %v", err)
@@ -180,7 +180,7 @@ func TestReadFile_NotFound(t *testing.T) {
 }
 
 func TestReadFile_EmptyWorkdir(t *testing.T) {
-	ctx := sessionCtx("", "read_file")
+	ctx := sessionCtx("", Legs(Untrusted, Private))
 	r, err := callTool(ctx, readFileHandler, map[string]any{"path": "/hello.txt"})
 	if err != nil {
 		t.Fatalf("unexpected Go error: %v", err)
@@ -192,7 +192,7 @@ func TestReadFile_EmptyWorkdir(t *testing.T) {
 
 func TestWriteFile_Success(t *testing.T) {
 	dir := t.TempDir()
-	ctx := sessionCtx(dir, "write_file")
+	ctx := sessionCtx(dir, Legs(Private, Mutate))
 	r, err := callTool(ctx, writeFileHandler, map[string]any{
 		"path":    "/subdir/new.txt",
 		"content": "written content",
@@ -211,7 +211,7 @@ func TestWriteFile_Success(t *testing.T) {
 
 func TestWriteFile_CreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
-	ctx := sessionCtx(dir, "write_file")
+	ctx := sessionCtx(dir, Legs(Private, Mutate))
 	_, err := callTool(ctx, writeFileHandler, map[string]any{
 		"path":    "/a/b/c/deep.txt",
 		"content": "deep",
@@ -229,7 +229,7 @@ func TestListDirectory_Success(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.go"), []byte(""), 0644)
 	os.Mkdir(filepath.Join(dir, "pkg"), 0755)
 
-	ctx := sessionCtx(dir, "list_directory")
+	ctx := sessionCtx(dir, Legs(Untrusted, Private))
 	r, err := callTool(ctx, listDirectoryHandler, map[string]any{"path": "/"})
 	if err != nil || isError(r) {
 		t.Fatalf("unexpected error; err=%v result=%v", err, resultText(r))
@@ -245,7 +245,7 @@ func TestListDirectory_Success(t *testing.T) {
 
 func TestCreateDirectory_Success(t *testing.T) {
 	dir := t.TempDir()
-	ctx := sessionCtx(dir, "create_directory")
+	ctx := sessionCtx(dir, Legs(Private, Mutate))
 	r, err := callTool(ctx, createDirectoryHandler, map[string]any{"path": "/new/nested/dir"})
 	if err != nil || isError(r) {
 		t.Fatalf("unexpected error; err=%v result=%v", err, resultText(r))
@@ -257,7 +257,7 @@ func TestCreateDirectory_Success(t *testing.T) {
 
 func TestCreateDirectory_Idempotent(t *testing.T) {
 	dir := t.TempDir()
-	ctx := sessionCtx(dir, "create_directory")
+	ctx := sessionCtx(dir, Legs(Private, Mutate))
 	for i := range 2 {
 		r, err := callTool(ctx, createDirectoryHandler, map[string]any{"path": "/repeated"})
 		if err != nil || isError(r) {

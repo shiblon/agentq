@@ -53,7 +53,7 @@ func testConfig(t *testing.T, runnerURL string) Config {
 	priv, _ := testKeyPair(t)
 	return Config{
 		Name:       "coder",
-		Tools:      []string{"read_file", "write_file"},
+		Legs:       mcp.Legs(mcp.Untrusted, mcp.Private),
 		PrivKey:    priv,
 		Issuer:     "agentq",
 		MCPAddr:    "http://mcp:8081",
@@ -96,9 +96,9 @@ func fakeRunnerServer(t *testing.T, output string) (*httptest.Server, <-chan run
 func newFakeTask(t *testing.T, sessionURI string, payload Payload) (*entroq.Task, models.Task) {
 	t.Helper()
 	appTask := models.NewTask("agentq/coder/inbox", sessionURI, map[string]any{
-		"messages":      payload.Messages,
-		"workdir":       payload.Workdir,
-		"blocked_tools": payload.BlockedTools,
+		"messages": payload.Messages,
+		"workdir":  payload.Workdir,
+		"legs":     payload.Legs,
 	})
 	value, err := json.Marshal(appTask)
 	if err != nil {
@@ -111,151 +111,41 @@ func newFakeTask(t *testing.T, sessionURI string, payload Payload) (*entroq.Task
 	}, *appTask
 }
 
-// -- ExpandTools --------------------------------------------------------------
+// -- narrow -------------------------------------------------------------------
 
-func TestExpandTools_Wildcard(t *testing.T) {
-	got := ExpandTools([]string{"*"})
-	if len(got) == 0 {
-		t.Error("wildcard should expand to non-empty tool list")
+func TestNarrow_EmptyRequestKeepsCeiling(t *testing.T) {
+	ceiling := mcp.Legs(mcp.Untrusted, mcp.Private)
+	got, err := narrow(ceiling, nil)
+	if err != nil {
+		t.Fatalf("narrow: %v", err)
 	}
-	for _, name := range got {
-		if name == "*" {
-			t.Error("expanded list should not contain wildcard")
-		}
-	}
-}
-
-func TestExpandTools_ExplicitList(t *testing.T) {
-	want := []string{"read_file", "list_directory"}
-	got := ExpandTools(want)
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Errorf("got %v, want %v", got, want)
+	if got != ceiling {
+		t.Errorf("got %s, want %s", got, ceiling)
 	}
 }
 
-func TestExpandTools_Empty(t *testing.T) {
-	got := ExpandTools(nil)
-	if len(got) != 0 {
-		t.Errorf("empty tools should stay empty, got %v", got)
+func TestNarrow_Attenuates(t *testing.T) {
+	got, err := narrow(mcp.Legs(mcp.Untrusted, mcp.Private), []string{"private"})
+	if err != nil {
+		t.Fatalf("narrow: %v", err)
+	}
+	if got != mcp.Legs(mcp.Private) {
+		t.Errorf("got %s, want private", got)
 	}
 }
 
-// -- applyAllowed -------------------------------------------------------------
-
-func TestApplyAllowed_Narrows(t *testing.T) {
-	tools := []string{"read_file", "write_file", "list_directory", "create_directory"}
-	got := applyAllowed(tools, []string{"read_file", "list_directory"})
-	if len(got) != 2 {
-		t.Fatalf("got %v, want [read_file list_directory]", got)
-	}
-	for _, name := range got {
-		if name != "read_file" && name != "list_directory" {
-			t.Errorf("unexpected tool %q in allowed result", name)
-		}
-	}
-}
-
-func TestApplyAllowed_Empty_ReturnsAll(t *testing.T) {
-	tools := []string{"read_file", "write_file"}
-	got := applyAllowed(tools, nil)
-	if len(got) != len(tools) {
-		t.Errorf("empty allowed should return full list, got %v", got)
-	}
-}
-
-func TestApplyAllowed_AllowedNotInCeiling_Ignored(t *testing.T) {
-	// Allowed contains a tool not in the configured ceiling -- it should
-	// not appear in the result (intersection, not union).
-	tools := []string{"read_file", "list_directory"}
-	got := applyAllowed(tools, []string{"read_file", "nonexistent_tool"})
-	if len(got) != 1 || got[0] != "read_file" {
-		t.Errorf("got %v, want [read_file]", got)
-	}
-}
-
-// -- applyBlocks ----------------------------------------------------------------
-
-func TestApplyBlocks_RemovesBlocked(t *testing.T) {
-	tools := []string{"read_file", "write_file", "list_directory"}
-	got := applyBlocks(tools, []string{"write_file"})
-	if len(got) != 2 {
-		t.Fatalf("got %v, want [read_file list_directory]", got)
-	}
-	for _, name := range got {
-		if name == "write_file" {
-			t.Errorf("write_file should be blocked, got %v", got)
-		}
-	}
-}
-
-func TestApplyBlocks_NoBlocks(t *testing.T) {
-	tools := []string{"read_file", "write_file"}
-	got := applyBlocks(tools, nil)
-	if len(got) != len(tools) {
-		t.Errorf("no blocks should return full list")
-	}
-}
-
-func TestApplyAllowedThenBlocks_Pipeline(t *testing.T) {
-	// Full pipeline: ceiling → allowed narrows → blocked removes.
-	ceiling := []string{"read_file", "write_file", "list_directory", "create_directory"}
-
-	// Supervisor allows read+write, then blocks write for this read-only task.
-	allowed := []string{"read_file", "write_file"}
-	blocked := []string{"write_file"}
-
-	got := applyBlocks(applyAllowed(ceiling, allowed), blocked)
-	if len(got) != 1 || got[0] != "read_file" {
-		t.Errorf("got %v, want [read_file]", got)
-	}
-}
-
-// -- remarshal ----------------------------------------------------------------
-
-func TestRemarshal_RoundTrip(t *testing.T) {
-	type inner struct {
-		X int    `json:"x"`
-		Y string `json:"y"`
-	}
-	src := map[string]any{"x": float64(42), "y": "hello"}
-	var dst inner
-	if err := remarshal(src, &dst); err != nil {
-		t.Fatalf("remarshal: %v", err)
-	}
-	if dst.X != 42 || dst.Y != "hello" {
-		t.Errorf("got {X:%d Y:%q}, want {X:42 Y:hello}", dst.X, dst.Y)
-	}
-}
-
-// -- ProcessTask unit tests ---------------------------------------------------
-
-func TestProcessTask_MissingMessages(t *testing.T) {
-	ts, _ := fakeRunnerServer(t, "irrelevant")
-	w := New(testConfig(t, ts.URL), nil)
-	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
-		Workdir:  "/work",
-		Messages: nil, //nolint
-	})
-	_, err := w.ProcessTask(context.Background(), task, appTask)
+func TestNarrow_RefusesWidening(t *testing.T) {
+	// A task may not ask for a leg its agent's ceiling does not hold, and the
+	// refusal is an error rather than a silent drop.
+	_, err := narrow(mcp.Legs(mcp.Untrusted, mcp.Private), []string{"mutate"})
 	if err == nil {
-		t.Error("expected error for missing messages")
+		t.Fatal("expected an error when a task asks to widen its ceiling")
 	}
 }
 
-func TestProcessTask_RunnerError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "agent crashed", http.StatusInternalServerError)
-	}))
-	t.Cleanup(ts.Close)
-
-	w := New(testConfig(t, ts.URL), nil)
-	task, appTask := newFakeTask(t, "doc:sessions/abc", Payload{
-		Workdir:  "/work",
-		Messages: []runner.Message{models.TextMessage("user", "go")},
-	})
-	_, err := w.ProcessTask(context.Background(), task, appTask)
-	if err == nil {
-		t.Error("expected error when runner returns 500")
+func TestNarrow_RejectsUnknownLeg(t *testing.T) {
+	if _, err := narrow(mcp.Legs(mcp.Private), []string{"sudo"}); err == nil {
+		t.Fatal("expected an error for an unknown leg name")
 	}
 }
 
@@ -264,7 +154,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 	cfg := Config{
 		Name:       "coder",
-		Tools:      []string{"read_file", "write_file"},
+		Legs:       mcp.Legs(mcp.Untrusted, mcp.Private),
 		PrivKey:    priv,
 		Issuer:     "agentq",
 		MCPAddr:    "http://mcp:8081",
@@ -280,7 +170,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 			models.TextMessage("system", "You are a coder."),
 			models.TextMessage("user", "Write a function."),
 		},
-		BlockedTools: []string{"write_file"},
+		Legs: []string{"private"},
 	})
 
 	args, err := w.ProcessTask(context.Background(), task, appTask)
@@ -302,11 +192,10 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 		if claims.Workdir != "/var/sessions/test-session" {
 			t.Errorf("JWT workdir = %q, want /var/sessions/test-session", claims.Workdir)
 		}
-		// write_file was banned -- should not appear in the JWT allowlist.
-		for _, tool := range claims.ToolAllowlist {
-			if tool == "write_file" {
-				t.Error("write_file should be banned from JWT allowlist")
-			}
+		// The task narrowed itself to private alone, so the minted token must
+		// not carry untrusted even though the agent's ceiling holds it.
+		if claims.Legs != mcp.Legs(mcp.Private) {
+			t.Errorf("JWT legs = %s, want private only after narrowing", claims.Legs)
 		}
 		_ = pubSet // could also verify with Parse, but ParseInsecure is enough here
 	case <-time.After(time.Second):

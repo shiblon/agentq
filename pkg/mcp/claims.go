@@ -12,7 +12,7 @@ import (
 const (
 	claimSession  = "mcp_session"
 	claimWorkdir  = "mcp_workdir"
-	claimTools    = "mcp_tools"
+	claimLegs     = "mcp_legs"
 	claimBranches = "mcp_branches"
 	claimReplyTo  = "mcp_reply_to"
 	claimDepth    = "mcp_depth"
@@ -21,9 +21,10 @@ const (
 )
 
 // Claims is the signed configuration envelope carried in each MCP session JWT.
-// It tells the MCP server which filesystem path to expose and which tools to
-// permit. Any component holding the signing key may mint tokens; the package
-// makes no assumptions about the caller.
+// It tells the MCP server which filesystem path to expose and which of the
+// three rule-of-two legs the session may exercise. Any component holding the
+// signing key may mint tokens; the package makes no assumptions about the
+// caller.
 type Claims struct {
 	// Issuer identifies the component that minted this token (e.g. "agentq").
 	// Must match the issuer expected by the MCP server on Parse.
@@ -37,16 +38,24 @@ type Claims struct {
 	// An empty string means no filesystem access is permitted for this session.
 	Workdir string
 
-	// ToolAllowlist names the tools this session may invoke.
-	// An empty list permits no tools. Tools absent from this list are
-	// hidden from tools/list and rejected at call time.
-	ToolAllowlist []string
+	// Legs is what this session is permitted to do, in rule-of-two terms.
+	// A tool is visible in tools/list and callable only when Legs covers
+	// everything that tool costs, so the set of usable tools is derived
+	// rather than enumerated: tagging a new tool grants it to every session
+	// whose legs already cover it.
+	//
+	// Empty permits nothing. More than MaxLegs is refused at mint.
+	Legs LegSet
 
-	// AllowedBranches constrains which git branches may be pushed to or pulled
-	// from. Patterns are matched as globs (e.g. "feature/*", "develop").
-	// Empty means no git push/pull is permitted even if those tools are listed.
-	// TODO: this is the first per-tool config field; generalise to
-	// ToolConfig map[string]any when a second tool needs its own config.
+	// AllowedBranches constrains which git branches may be pushed to.
+	// Patterns are matched as globs (e.g. "feature/*", "develop").
+	// Empty means no push is permitted even when Legs would allow it.
+	//
+	// This is scope rather than legs: write_file and git_push cost the same
+	// legs, and scope is what separates a change inside the workdir from one
+	// that leaves it.
+	// TODO: this is the first per-tool scope field; generalise to
+	// ToolConfig map[string]any when a second tool needs its own.
 	AllowedBranches []string
 
 	// ReplyTo is the EntroQ queue where dispatch_to_agent should route agent
@@ -65,9 +74,16 @@ type Claims struct {
 	Expiry time.Time
 }
 
-// Mint encodes c as a signed JWT using privKey (RS256).
+// Mint encodes c as a signed JWT using privKey.
 // If c.Expiry is zero, the token expires in one hour from now.
+//
+// Mint refuses to sign a token carrying more than MaxLegs. This is the only
+// place authority is granted, so the cap is enforced here rather than trusted
+// to whoever assembled the Claims.
 func Mint(privKey jwk.Key, c Claims) (string, error) {
+	if err := c.Legs.Valid(); err != nil {
+		return "", fmt.Errorf("mcp: refusing to mint a token granting %w", err)
+	}
 	expiry := c.Expiry
 	if expiry.IsZero() {
 		expiry = time.Now().Add(defaultTokenTTL)
@@ -78,7 +94,7 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		Expiration(expiry).
 		Claim(claimSession, c.SessionID).
 		Claim(claimWorkdir, c.Workdir).
-		Claim(claimTools, c.ToolAllowlist).
+		Claim(claimLegs, c.Legs.Names()).
 		Claim(claimBranches, c.AllowedBranches).
 		Claim(claimDepth, c.Depth)
 	if c.ReplyTo != "" {
@@ -146,9 +162,16 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 		return nil, fmt.Errorf("mcp: extract claims: %w", err)
 	}
 
-	tools, err := requireStringSlice(private, claimTools)
+	legNames, err := requireStringSlice(private, claimLegs)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: extract claims: %w", err)
+	}
+	legs, err := ParseLegs(legNames)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: extract claims: %w", err)
+	}
+	if err := legs.Valid(); err != nil {
+		return nil, fmt.Errorf("mcp: token grants %w", err)
 	}
 
 	// AllowedBranches is optional -- absent or empty means no git push/pull.
@@ -179,7 +202,7 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 		Issuer:          tok.Issuer(),
 		SessionID:       sessionID,
 		Workdir:         workdir,
-		ToolAllowlist:   tools,
+		Legs:            legs,
 		AllowedBranches: branches,
 		ReplyTo:         replyTo,
 		Depth:           depth,

@@ -27,7 +27,7 @@ func grepTool() server.ServerTool {
 			mcplib.Description("Path to search within (default: session root)"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("grep",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("grep",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx)
 			pattern, err := req.RequireString("pattern")
@@ -61,7 +61,7 @@ func findFilesTool() server.ServerTool {
 			mcplib.Description("Directory to search within (default: session root)"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withAllowlistCheck("find_files",
+	return server.ServerTool{Tool: def, Handler: withLegCheck("find_files",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			c := claimsFromContext(ctx)
 			pattern, err := req.RequireString("pattern")

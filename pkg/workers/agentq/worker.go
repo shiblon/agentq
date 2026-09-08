@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,9 +31,10 @@ type Config struct {
 	// Description is the agent's role, injected as part of the system prompt.
 	Description string
 
-	// Tools is the ceiling of MCP tools this agent may use, already expanded
-	// (no wildcards). Use ExpandTools to resolve ["*"] before constructing Config.
-	Tools []string
+	// Legs is the ceiling of what this agent may do, in rule-of-two terms.
+	// A task may narrow it but never widen it, and the tools that ceiling
+	// admits are derived from it rather than listed.
+	Legs mcp.LegSet
 
 	// PrivKey is the RSA private key used to sign MCP session JWTs.
 	PrivKey jwk.Key
@@ -67,13 +67,10 @@ type Payload struct {
 	// Set by the Supervisor based on the session's working directory.
 	Workdir string `json:"workdir"`
 
-	// AllowedTools, if non-empty, narrows the agent's configured ceiling to
-	// only the tools listed here (intersection). Applied before BlockedTools.
-	AllowedTools []string `json:"allowed_tools,omitempty"`
-
-	// BlockedTools removes specific tools from the effective set after
-	// AllowedTools has been applied. Absent means no blocks.
-	BlockedTools []string `json:"blocked_tools,omitempty"`
+	// Legs, if non-empty, narrows this task to fewer legs than the agent's
+	// configured ceiling. Naming a leg the ceiling lacks is refused rather
+	// than ignored: attenuation only, never widening.
+	Legs []string `json:"legs,omitempty"`
 
 	// ParentSessionID is the plain session ID (not URI) of the supervisor session
 	// that dispatched this task via dispatch_to_agent. Set by that tool; used by
@@ -124,8 +121,8 @@ func (w *Worker) getPrivKey() jwk.Key {
 // worker framework pre-unmarshals task.Value into appTask before calling here.
 // It:
 //  1. Extracts the typed Payload from appTask.
-//  2. Computes effective tools: Config.Tools minus Payload.BlockedTools.
-//  3. Mints an MCP session JWT with those tools and the workdir.
+//  2. Narrows Config.Legs by Payload.Legs, refusing any widening.
+//  3. Mints an MCP session JWT with those legs and the workdir.
 //  4. Calls the runner via HTTP.
 //  5. Returns EntroQ modifications: insert result task + delete claimed task.
 func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask models.Task) ([]entroq.ModifyArg, error) {
@@ -137,15 +134,18 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		return nil, fmt.Errorf("agentq %s: task missing messages", w.cfg.Name)
 	}
 
-	effectiveTools := applyBlocks(applyAllowed(w.cfg.Tools, payload.AllowedTools), payload.BlockedTools)
+	effectiveLegs, err := narrow(w.cfg.Legs, payload.Legs)
+	if err != nil {
+		return nil, fmt.Errorf("agentq %s: %w", w.cfg.Name, err)
+	}
 
 	jwt, err := mcp.Mint(w.getPrivKey(), mcp.Claims{
-		Issuer:        w.cfg.Issuer,
-		SessionID:     appTask.SessionURI,
-		Workdir:       payload.Workdir,
-		ToolAllowlist: effectiveTools,
-		Depth:         payload.Depth,
-		Expiry:        time.Now().Add(2 * time.Hour),
+		Issuer:    w.cfg.Issuer,
+		SessionID: appTask.SessionURI,
+		Workdir:   payload.Workdir,
+		Legs:      effectiveLegs,
+		Depth:     payload.Depth,
+		Expiry:    time.Now().Add(2 * time.Hour),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: mint jwt: %w", w.cfg.Name, err)
@@ -154,7 +154,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	output, err := w.callRunner(ctx, runner.RunRequest{
 		JWT:          jwt,
 		Messages:     payload.Messages,
-		SystemPrompt: w.systemPrompt(effectiveTools),
+		SystemPrompt: w.systemPrompt(effectiveLegs),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: runner: %w", w.cfg.Name, err)
@@ -232,9 +232,10 @@ func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string,
 }
 
 // systemPrompt returns the system prompt for this agent. If Config.SystemPrompt
-// is set (loaded from prompt_file), it is used as the base and the effective
-// tool list is appended. Otherwise the generic identity prompt is generated.
-func (w *Worker) systemPrompt(effectiveTools []string) string {
+// is set (loaded from prompt_file), it is used as the base and the tools the
+// session's legs admit are appended. Otherwise a generic identity prompt is
+// generated.
+func (w *Worker) systemPrompt(legs mcp.LegSet) string {
 	var base string
 	if w.cfg.SystemPrompt != "" {
 		base = w.cfg.SystemPrompt
@@ -249,64 +250,29 @@ func (w *Worker) systemPrompt(effectiveTools []string) string {
 		}
 		base = sb.String()
 	}
-	if len(effectiveTools) > 0 {
-		return base + "\n\nAvailable MCP tools: " + strings.Join(effectiveTools, ", ") + ".\nUse only these tools. Do not use any other tools."
+	tools := mcp.GrantableWith(legs)
+	if len(tools) > 0 {
+		return base + "\n\nAvailable MCP tools: " + strings.Join(tools, ", ") + ".\nUse only these tools. Do not use any other tools."
 	}
 	return base + "\n\nYou have no MCP tools available. Respond using only your own knowledge."
 }
 
-// applyAllowed narrows tools to the intersection with allowed.
-// If allowed is empty, the full tools list is returned unchanged.
-func applyAllowed(tools, allowed []string) []string {
-	if len(allowed) == 0 {
-		return tools
+// narrow returns ceiling restricted to the legs named in want. An empty want
+// leaves the ceiling untouched. Naming a leg the ceiling does not hold is an
+// error rather than a silent drop, so a task that asks for more than it may
+// have fails loudly at the only place authority is granted.
+func narrow(ceiling mcp.LegSet, want []string) (mcp.LegSet, error) {
+	if len(want) == 0 {
+		return ceiling, nil
 	}
-	result := make([]string, 0, len(allowed))
-	for _, t := range tools {
-		if slices.Contains(allowed, t) {
-			result = append(result, t)
-		}
+	asked, err := mcp.ParseLegs(want)
+	if err != nil {
+		return 0, fmt.Errorf("task legs: %w", err)
 	}
-	return result
-}
-
-// applyBlocks returns tools with any blocked names removed.
-func applyBlocks(tools, blocked []string) []string {
-	if len(blocked) == 0 {
-		return tools
+	if !ceiling.Contains(asked) {
+		return 0, fmt.Errorf("task asks for %s but this agent's ceiling is %s", asked, ceiling)
 	}
-	result := make([]string, 0, len(tools))
-	for _, t := range tools {
-		if !slices.Contains(blocked, t) {
-			result = append(result, t)
-		}
-	}
-	return result
-}
-
-// ExpandTools resolves the ["*"] wildcard to the safe default tool set:
-// file, git, go, and search tools. run_command is excluded and must be
-// listed explicitly. Non-wildcard lists are returned as-is (fail-closed on empty).
-func ExpandTools(tools []string) []string {
-	hasWildcard := false
-	var explicit []string
-	for _, t := range tools {
-		if t == "*" {
-			hasWildcard = true
-		} else {
-			explicit = append(explicit, t)
-		}
-	}
-	if !hasWildcard {
-		return tools
-	}
-	all := mcp.AllSafeTools()
-	names := make([]string, 0, len(all)+len(explicit))
-	for _, tool := range all {
-		names = append(names, tool.Tool.Name)
-	}
-	names = append(names, explicit...)
-	return names
+	return asked, nil
 }
 
 // remarshal round-trips v through JSON to populate dst. Used to convert a

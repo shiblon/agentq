@@ -99,7 +99,13 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 		kp = &mcp.KeyPair{Private: key}
 	}
 
-	tools := agentqworker.ExpandTools(agent.Tools)
+	legs, err := mcp.ParseLegs(agent.Legs)
+	if err != nil {
+		return fmt.Errorf("agent %q legs: %w", agentName, err)
+	}
+	if err := legs.Valid(); err != nil {
+		return fmt.Errorf("agent %q ceiling grants %w", agentName, err)
+	}
 
 	var systemPrompt string
 	if agent.PromptFile != "" {
@@ -111,7 +117,8 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 		log.Printf("worker %s: loaded system prompt from %s", agentName, agent.PromptFile)
 	}
 
-	log.Printf("worker %s: claiming from %q, %d tools, runner=%s", agentName, agent.Queue, len(tools), agent.RunnerURL)
+	log.Printf("worker %s: claiming from %q, legs=%s (%d tools), runner=%s",
+		agentName, agent.Queue, legs, len(mcp.GrantableWith(legs)), agent.RunnerURL)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -125,7 +132,7 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	workerCfg := agentqworker.Config{
 		Name:         agentName,
 		Description:  agent.Description,
-		Tools:        tools,
+		Legs:         legs,
 		PrivKey:      kp.Private,
 		Issuer:       issuer,
 		MCPAddr:      agent.MCPAddr,

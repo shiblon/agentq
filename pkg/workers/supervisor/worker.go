@@ -42,10 +42,10 @@ type Config struct {
 	// RunnerURL is the base URL of the runner microservice.
 	RunnerURL string
 
-	// Tools is the ceiling of MCP tools the supervisor may use.
-	// Must include "dispatch_to_agent"; add file tools if the supervisor
-	// needs to read context or write summaries.
-	Tools []string
+	// Legs is the ceiling of what the supervisor may do. It needs Mutate to
+	// dispatch; adding Untrusted would give the tier that mints tokens all
+	// three legs, so it is deliberately not granted here.
+	Legs mcp.LegSet
 
 	// DefaultWorkdir is the filesystem path used when the session has no
 	// workspace configured (Meta.WorkspaceRepo is empty).
@@ -196,12 +196,12 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 
 	supervisorQueue := task.Queue
 	jwt, err := mcp.Mint(w.getPrivKey(), mcp.Claims{
-		Issuer:        w.cfg.Issuer,
-		SessionID:     appTask.SessionURI,
-		Workdir:       workdir,
-		ToolAllowlist: w.cfg.Tools,
-		ReplyTo:       supervisorQueue,
-		Expiry:        time.Now().Add(2 * time.Hour),
+		Issuer:    w.cfg.Issuer,
+		SessionID: appTask.SessionURI,
+		Workdir:   workdir,
+		Legs:      w.cfg.Legs,
+		ReplyTo:   supervisorQueue,
+		Expiry:    time.Now().Add(2 * time.Hour),
 	})
 	if err != nil {
 		return nil, worker.MoveErrorf("supervisor: mint jwt: %v", err)

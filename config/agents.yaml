@@ -32,35 +32,37 @@ rubric: |
 
 agents:
   # coder: primary implementation agent.
-  # Full tool access: reads, writes, and navigates the codebase.
   - name: coder
     queue: agentq/coder/inbox
     description: Writes, reads, and edits source code to implement a task.
     prompt_file: config/prompts/coder.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    tools:
-      - "*"          # expands to file, git, go, and search tools
-      - run_command  # explicit: broad shell access needed for builds, tests, package managers
+    # A coder must both read the tree and change it, which is already two
+    # legs, so it may not also ingest anything it did not author. Give it
+    # paths to work on rather than letting it go looking.
+    legs:
+      - private
+      - mutate
 
-  # reviewer: read-only access; never writes files.
+  # reviewer: ingests code and reports; never changes anything.
   - name: reviewer
     queue: agentq/reviewer/inbox
     description: Reviews code written by the coder for correctness, style, and tests.
     prompt_file: config/prompts/reviewer.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    tools:
-      - read_file
-      - list_directory
+    legs:
+      - untrusted
+      - private
 
-  # researcher: read-only access; looks things up without touching the codebase.
+  # researcher: ingests documentation and reports; touches nothing.
   - name: researcher
     queue: agentq/researcher/inbox
     description: Researches questions using web search and documentation lookup.
     prompt_file: config/prompts/researcher.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    tools:
-      - read_file
-      - list_directory
+    legs:
+      - untrusted
+      - private
