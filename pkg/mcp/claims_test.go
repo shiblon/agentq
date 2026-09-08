@@ -51,8 +51,7 @@ func TestMintParse_RoundTrip(t *testing.T) {
 	want := Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-123",
-		Workdir:   "/var/agentq/sessions/sess-123",
-		Legs:      Legs(Untrusted, Private),
+		Grants:    GrantSet{{Tool: "read_file", Scope: Scope{Root: "/var/agentq/sessions/sess-123"}}, {Tool: "grep", Scope: Scope{Root: "/var/agentq/sessions/sess-123"}}, {Tool: "git_log", Scope: Scope{Root: "/var/agentq/sessions/sess-123"}}, {Tool: "list_directory", Scope: Scope{Root: "/var/agentq/sessions/sess-123"}}},
 		Expiry:    time.Now().Add(30 * time.Minute).Truncate(time.Second),
 	}
 
@@ -72,25 +71,21 @@ func TestMintParse_RoundTrip(t *testing.T) {
 	if got.SessionID != want.SessionID {
 		t.Errorf("SessionID = %q, want %q", got.SessionID, want.SessionID)
 	}
-	if got.Workdir != want.Workdir {
-		t.Errorf("Workdir = %q, want %q", got.Workdir, want.Workdir)
-	}
-	if got.Legs != want.Legs {
-		t.Errorf("Legs = %s, want %s", got.Legs, want.Legs)
+	if len(got.Grants) != len(want.Grants) {
+		t.Errorf("Grants = %v, want %v", got.Grants, want.Grants)
 	}
 	if !got.Expiry.Equal(want.Expiry) {
 		t.Errorf("Expiry = %v, want %v", got.Expiry, want.Expiry)
 	}
 }
 
-func TestMintParse_NoLegs(t *testing.T) {
+func TestMintParse_NoGrants(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -100,8 +95,8 @@ func TestMintParse_NoLegs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if got.Legs != Legs() {
-		t.Errorf("Legs = %s, want none", got.Legs)
+	if len(got.Grants) != 1 {
+		t.Errorf("Grants = %v, want the single echo grant", got.Grants)
 	}
 }
 
@@ -111,19 +106,14 @@ func TestMintParse_EmptyWorkdir(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "",
-		Legs:      Legs(Untrusted, Private),
+		Grants:    GrantSet{{Tool: "read_file", Scope: Scope{Root: "/work"}}, {Tool: "grep", Scope: Scope{Root: "/work"}}, {Tool: "git_log", Scope: Scope{Root: "/work"}}, {Tool: "list_directory", Scope: Scope{Root: "/work"}}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
 
-	got, err := Parse(pubSet, "agentq", raw)
-	if err != nil {
+	if _, err := Parse(pubSet, "agentq", raw); err != nil {
 		t.Fatalf("Parse: %v", err)
-	}
-	if got.Workdir != "" {
-		t.Errorf("Workdir = %q, want empty", got.Workdir)
 	}
 }
 
@@ -134,8 +124,7 @@ func TestMintParse_DefaultExpiry(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 		// Expiry zero: should default to ~1 hour
 	})
 	if err != nil {
@@ -164,8 +153,7 @@ func TestParseInsecure_RoundTrip(t *testing.T) {
 	want := Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-insecure",
-		Workdir:   "/var/work",
-		Legs:      Legs(Untrusted, Private),
+		Grants:    GrantSet{{Tool: "read_file", Scope: Scope{Root: "/var/work"}}, {Tool: "grep", Scope: Scope{Root: "/var/work"}}, {Tool: "git_log", Scope: Scope{Root: "/var/work"}}, {Tool: "list_directory", Scope: Scope{Root: "/var/work"}}},
 	}
 	raw, err := Mint(priv, want)
 	if err != nil {
@@ -178,11 +166,8 @@ func TestParseInsecure_RoundTrip(t *testing.T) {
 	if got.SessionID != want.SessionID {
 		t.Errorf("SessionID = %q, want %q", got.SessionID, want.SessionID)
 	}
-	if got.Workdir != want.Workdir {
-		t.Errorf("Workdir = %q, want %q", got.Workdir, want.Workdir)
-	}
-	if got.Legs != want.Legs {
-		t.Fatalf("Legs = %s, want %s", got.Legs, want.Legs)
+	if len(got.Grants) != len(want.Grants) {
+		t.Fatalf("Grants = %v, want %v", got.Grants, want.Grants)
 	}
 }
 
@@ -193,8 +178,7 @@ func TestParseInsecure_AcceptsWrongKey(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -214,8 +198,7 @@ func TestParseInsecure_AcceptsExpired(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 		Expiry:    time.Now().Add(-time.Hour),
 	})
 	if err != nil {
@@ -281,8 +264,7 @@ func TestParse_WrongIssuer(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -300,8 +282,7 @@ func TestParse_ExpiredToken(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 		Expiry:    time.Now().Add(-time.Minute),
 	})
 	if err != nil {
@@ -321,8 +302,7 @@ func TestParse_BadSignature(t *testing.T) {
 	raw, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)

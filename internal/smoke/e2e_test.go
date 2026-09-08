@@ -204,7 +204,7 @@ func TestE2E_AgentQWorkerThroughRunnerToMCP(t *testing.T) {
 	eq := newEQ(t)
 	w := agentqworker.New(agentqworker.Config{
 		Name:       "coder",
-		Legs:       mcp.Legs(),
+		Grants:     mcp.GrantSet{{Tool: "echo"}},
 		PrivKey:    kp.Private,
 		Issuer:     "agentq",
 		MCPAddr:    mcpTS.URL,

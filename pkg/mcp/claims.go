@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,12 +11,10 @@ import (
 )
 
 const (
-	claimSession  = "mcp_session"
-	claimWorkdir  = "mcp_workdir"
-	claimLegs     = "mcp_legs"
-	claimBranches = "mcp_branches"
-	claimReplyTo  = "mcp_reply_to"
-	claimDepth    = "mcp_depth"
+	claimSession = "mcp_session"
+	claimGrants  = "mcp_grants"
+	claimReplyTo = "mcp_reply_to"
+	claimDepth   = "mcp_depth"
 
 	defaultTokenTTL = time.Hour
 )
@@ -33,30 +32,14 @@ type Claims struct {
 	// SessionID correlates this MCP session with the AgentQ task that spawned it.
 	SessionID string
 
-	// Workdir is the real filesystem path the MCP server exposes as /.
-	// All file tool paths are resolved relative to this directory.
-	// An empty string means no filesystem access is permitted for this session.
-	Workdir string
-
-	// Legs is what this session is permitted to do, in rule-of-two terms.
-	// A tool is visible in tools/list and callable only when Legs covers
-	// everything that tool costs, so the set of usable tools is derived
-	// rather than enumerated: tagging a new tool grants it to every session
-	// whose legs already cover it.
+	// Grants is what this session may do: each entry pairs a tool with the
+	// slice of its argument space the session may use it on. Roots live in
+	// grant scopes rather than session-wide, so the same verb can read a
+	// trusted mount and an untrusted tree at different cost.
 	//
-	// Empty permits nothing. More than MaxLegs is refused at mint.
-	Legs LegSet
-
-	// AllowedBranches constrains which git branches may be pushed to.
-	// Patterns are matched as globs (e.g. "feature/*", "develop").
-	// Empty means no push is permitted even when Legs would allow it.
-	//
-	// This is scope rather than legs: write_file and git_push cost the same
-	// legs, and scope is what separates a change inside the workdir from one
-	// that leaves it.
-	// TODO: this is the first per-tool scope field; generalise to
-	// ToolConfig map[string]any when a second tool needs its own.
-	AllowedBranches []string
+	// Empty permits nothing. Mint refuses a set whose legs together exceed
+	// MaxLegs, or where a trusted root is also writable.
+	Grants GrantSet
 
 	// ReplyTo is the EntroQ queue where dispatch_to_agent should route agent
 	// results. Typically the supervisor's own inbox. Required in any JWT that
@@ -81,8 +64,8 @@ type Claims struct {
 // place authority is granted, so the cap is enforced here rather than trusted
 // to whoever assembled the Claims.
 func Mint(privKey jwk.Key, c Claims) (string, error) {
-	if err := c.Legs.Valid(); err != nil {
-		return "", fmt.Errorf("mcp: refusing to mint a token granting %w", err)
+	if err := c.Grants.Validate(); err != nil {
+		return "", fmt.Errorf("mcp: refusing to mint: %w", err)
 	}
 	expiry := c.Expiry
 	if expiry.IsZero() {
@@ -93,9 +76,7 @@ func Mint(privKey jwk.Key, c Claims) (string, error) {
 		Issuer(c.Issuer).
 		Expiration(expiry).
 		Claim(claimSession, c.SessionID).
-		Claim(claimWorkdir, c.Workdir).
-		Claim(claimLegs, c.Legs.Names()).
-		Claim(claimBranches, c.AllowedBranches).
+		Claim(claimGrants, c.Grants).
 		Claim(claimDepth, c.Depth)
 	if c.ReplyTo != "" {
 		b = b.Claim(claimReplyTo, c.ReplyTo)
@@ -157,34 +138,12 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 		return nil, fmt.Errorf("mcp: extract claims: %w", err)
 	}
 
-	workdir, err := requireString(private, claimWorkdir)
+	grants, err := grantsFromClaim(private[claimGrants])
 	if err != nil {
 		return nil, fmt.Errorf("mcp: extract claims: %w", err)
 	}
-
-	legNames, err := requireStringSlice(private, claimLegs)
-	if err != nil {
-		return nil, fmt.Errorf("mcp: extract claims: %w", err)
-	}
-	legs, err := ParseLegs(legNames)
-	if err != nil {
-		return nil, fmt.Errorf("mcp: extract claims: %w", err)
-	}
-	if err := legs.Valid(); err != nil {
-		return nil, fmt.Errorf("mcp: token grants %w", err)
-	}
-
-	// AllowedBranches is optional -- absent or empty means no git push/pull.
-	var branches []string
-	if v, ok := private[claimBranches]; ok {
-		if arr, ok := v.([]any); ok {
-			branches = make([]string, 0, len(arr))
-			for _, elem := range arr {
-				if s, ok := elem.(string); ok {
-					branches = append(branches, s)
-				}
-			}
-		}
+	if err := grants.Validate(); err != nil {
+		return nil, fmt.Errorf("mcp: token is not valid: %w", err)
 	}
 
 	// ReplyTo is optional; absent means empty string.
@@ -199,14 +158,12 @@ func extractClaims(tok jwt.Token) (*Claims, error) {
 	}
 
 	return &Claims{
-		Issuer:          tok.Issuer(),
-		SessionID:       sessionID,
-		Workdir:         workdir,
-		Legs:            legs,
-		AllowedBranches: branches,
-		ReplyTo:         replyTo,
-		Depth:           depth,
-		Expiry:          tok.Expiration(),
+		Issuer:    tok.Issuer(),
+		SessionID: sessionID,
+		Grants:    grants,
+		ReplyTo:   replyTo,
+		Depth:     depth,
+		Expiry:    tok.Expiration(),
 	}, nil
 }
 
@@ -245,4 +202,21 @@ func requireStringSlice(private map[string]any, key string) ([]string, error) {
 		result[i] = s
 	}
 	return result, nil
+}
+
+// grantsFromClaim decodes the grants claim, which travels as JSON so the
+// scope vocabulary can grow without a new claim key per field.
+func grantsFromClaim(v any) (GrantSet, error) {
+	if v == nil {
+		return nil, fmt.Errorf("missing claim %q", claimGrants)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("claim %q: %w", claimGrants, err)
+	}
+	var gs GrantSet
+	if err := json.Unmarshal(raw, &gs); err != nil {
+		return nil, fmt.Errorf("claim %q: %w", claimGrants, err)
+	}
+	return gs, nil
 }

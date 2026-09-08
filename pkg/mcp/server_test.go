@@ -30,8 +30,7 @@ func TestJWTMiddleware_ValidToken_PassesThrough(t *testing.T) {
 	c := Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(Untrusted, Private),
+		Grants:    GrantSet{{Tool: "read_file", Scope: Scope{Root: "/work"}}, {Tool: "grep", Scope: Scope{Root: "/work"}}, {Tool: "git_log", Scope: Scope{Root: "/work"}}, {Tool: "list_directory", Scope: Scope{Root: "/work"}}},
 	}
 	tok, err := Mint(priv, c)
 	if err != nil {
@@ -82,8 +81,7 @@ func TestJWTMiddleware_ExpiredToken_Returns401(t *testing.T) {
 	c := Claims{
 		Issuer:    "agentq",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 		Expiry:    time.Now().Add(-time.Minute),
 	}
 	tok, err := Mint(priv, c)
@@ -112,8 +110,7 @@ func TestJWTMiddleware_WrongIssuer_Returns401(t *testing.T) {
 	c := Claims{
 		Issuer:    "other-issuer",
 		SessionID: "sess-1",
-		Workdir:   "/work",
-		Legs:      Legs(),
+		Grants:    GrantSet{{Tool: "echo"}},
 	}
 	tok, err := Mint(priv, c)
 	if err != nil {
@@ -170,10 +167,10 @@ func makeTools(names ...string) []mcplib.Tool {
 
 func TestLegFilter_KeepsOnlyCoveredTools(t *testing.T) {
 	s := &Server{}
-	c := &Claims{Legs: Legs(Untrusted, Private)}
+	c := &Claims{Grants: GrantSet{{Tool: "read_file"}, {Tool: "list_directory"}}}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
-	// delete_file has no leg tag, so it is never visible whatever the legs.
+	// delete_file is not granted, so it is never visible.
 	all := makeTools("read_file", "write_file", "delete_file", "list_directory")
 	got := toolNames(s.legFilter(ctx, all))
 
@@ -188,9 +185,9 @@ func TestLegFilter_KeepsOnlyCoveredTools(t *testing.T) {
 	}
 }
 
-func TestLegFilter_NoLegs_ReturnsEmpty(t *testing.T) {
+func TestLegFilter_NoGrants_ReturnsEmpty(t *testing.T) {
 	s := &Server{}
-	c := &Claims{Legs: Legs()}
+	c := &Claims{Grants: nil}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
 	got := s.legFilter(ctx, makeTools("read_file", "write_file"))
@@ -207,9 +204,9 @@ func TestLegFilter_NoClaims_ReturnsNil(t *testing.T) {
 	}
 }
 
-func TestLegFilter_MutatingSessionCannotIngest(t *testing.T) {
+func TestLegFilter_ShowsOnlyGrantedTools(t *testing.T) {
 	s := &Server{}
-	c := &Claims{Legs: Legs(Private, Mutate)}
+	c := &Claims{Grants: GrantSet{{Tool: "write_file"}}}
 	ctx := context.WithValue(context.Background(), claimsContextKey{}, c)
 
 	got := toolNames(s.legFilter(ctx, makeTools("read_file", "write_file")))

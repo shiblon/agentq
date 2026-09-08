@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/shiblon/agentq/pkg/mcp"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -26,13 +27,14 @@ type Agent struct {
 	// MCPAddr is the base URL of the MCP pool server this agent connects to.
 	MCPAddr string `yaml:"mcp_addr,omitempty" json:"mcp_addr,omitempty"`
 
-	// Legs is the ceiling of what this agent type may do, named from
-	// "untrusted", "private" and "mutate". At most two, because holding all
-	// three leaves a prompt injection unbounded. The tools this admits are
-	// derived from it, so there is no tool list to keep in step.
+	// Grants is the ceiling of what this agent type may do: each entry pairs
+	// a tool with the slice of its argument space the agent may use. The
+	// legs each grant costs are derived, and the union is capped at two, so
+	// an over-broad agent fails at startup rather than at runtime.
 	//
+	// A grant with no scope root is rooted at the task's own workdir.
 	// An empty list (or absent field) permits nothing (fail-closed).
-	Legs []string `yaml:"legs,omitempty" json:"legs,omitempty"`
+	Grants mcp.GrantSet `yaml:"grants,omitempty" json:"grants,omitempty"`
 }
 
 // WorkspaceConfig describes the shared file workspace for agent workers.

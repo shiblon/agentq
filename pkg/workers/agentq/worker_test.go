@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func testConfig(t *testing.T, runnerURL string) Config {
 	priv, _ := testKeyPair(t)
 	return Config{
 		Name:       "coder",
-		Legs:       mcp.Legs(mcp.Untrusted, mcp.Private),
+		Grants:     mcp.GrantSet{{Tool: "read_file"}, {Tool: "grep"}},
 		PrivKey:    priv,
 		Issuer:     "agentq",
 		MCPAddr:    "http://mcp:8081",
@@ -98,7 +99,7 @@ func newFakeTask(t *testing.T, sessionURI string, payload Payload) (*entroq.Task
 	appTask := models.NewTask("agentq/coder/inbox", sessionURI, map[string]any{
 		"messages": payload.Messages,
 		"workdir":  payload.Workdir,
-		"legs":     payload.Legs,
+		"tools":    payload.Tools,
 	})
 	value, err := json.Marshal(appTask)
 	if err != nil {
@@ -114,38 +115,39 @@ func newFakeTask(t *testing.T, sessionURI string, payload Payload) (*entroq.Task
 // -- narrow -------------------------------------------------------------------
 
 func TestNarrow_EmptyRequestKeepsCeiling(t *testing.T) {
-	ceiling := mcp.Legs(mcp.Untrusted, mcp.Private)
+	ceiling := mcp.GrantSet{{Tool: "read_file"}, {Tool: "grep"}}
 	got, err := narrow(ceiling, nil)
 	if err != nil {
 		t.Fatalf("narrow: %v", err)
 	}
-	if got != ceiling {
-		t.Errorf("got %s, want %s", got, ceiling)
+	if len(got) != len(ceiling) {
+		t.Errorf("got %v, want %v", got.Tools(), ceiling.Tools())
 	}
 }
 
 func TestNarrow_Attenuates(t *testing.T) {
-	got, err := narrow(mcp.Legs(mcp.Untrusted, mcp.Private), []string{"private"})
+	ceiling := mcp.GrantSet{{Tool: "read_file"}, {Tool: "write_file"}}
+	got, err := narrow(ceiling, []string{"read_file"})
 	if err != nil {
 		t.Fatalf("narrow: %v", err)
 	}
-	if got != mcp.Legs(mcp.Private) {
-		t.Errorf("got %s, want private", got)
+	if len(got) != 1 || got[0].Tool != "read_file" {
+		t.Errorf("got %v, want [read_file]", got.Tools())
 	}
 }
 
 func TestNarrow_RefusesWidening(t *testing.T) {
-	// A task may not ask for a leg its agent's ceiling does not hold, and the
-	// refusal is an error rather than a silent drop.
-	_, err := narrow(mcp.Legs(mcp.Untrusted, mcp.Private), []string{"mutate"})
+	// A task may not ask for a tool its agent's ceiling does not grant, and
+	// the refusal is an error rather than a silent drop.
+	_, err := narrow(mcp.GrantSet{{Tool: "read_file"}}, []string{"write_file"})
 	if err == nil {
 		t.Fatal("expected an error when a task asks to widen its ceiling")
 	}
 }
 
-func TestNarrow_RejectsUnknownLeg(t *testing.T) {
-	if _, err := narrow(mcp.Legs(mcp.Private), []string{"sudo"}); err == nil {
-		t.Fatal("expected an error for an unknown leg name")
+func TestNarrow_RejectsUngrantedTool(t *testing.T) {
+	if _, err := narrow(mcp.GrantSet{{Tool: "read_file"}}, []string{"sudo"}); err == nil {
+		t.Fatal("expected an error for a tool the ceiling does not grant")
 	}
 }
 
@@ -154,7 +156,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 	priv, pubSet := testKeyPair(t)
 	cfg := Config{
 		Name:       "coder",
-		Legs:       mcp.Legs(mcp.Untrusted, mcp.Private),
+		Grants:     mcp.GrantSet{{Tool: "read_file"}, {Tool: "grep"}},
 		PrivKey:    priv,
 		Issuer:     "agentq",
 		MCPAddr:    "http://mcp:8081",
@@ -170,7 +172,7 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 			models.TextMessage("system", "You are a coder."),
 			models.TextMessage("user", "Write a function."),
 		},
-		Legs: []string{"private"},
+		Tools: []string{"read_file"},
 	})
 
 	args, err := w.ProcessTask(context.Background(), task, appTask)
@@ -189,13 +191,18 @@ func TestProcessTask_Success_ModifyArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseInsecure: %v", err)
 		}
-		if claims.Workdir != "/var/sessions/test-session" {
-			t.Errorf("JWT workdir = %q, want /var/sessions/test-session", claims.Workdir)
+		// Scopeless config grants are rooted at the task's workdir.
+		g, ok := claims.Grants.Find("read_file", "/x")
+		if !ok {
+			t.Fatalf("read_file not granted; grants = %v", claims.Grants.Tools())
 		}
-		// The task narrowed itself to private alone, so the minted token must
-		// not carry untrusted even though the agent's ceiling holds it.
-		if claims.Legs != mcp.Legs(mcp.Private) {
-			t.Errorf("JWT legs = %s, want private only after narrowing", claims.Legs)
+		if g.Scope.Root != "/var/sessions/test-session" {
+			t.Errorf("grant root = %q, want /var/sessions/test-session", g.Scope.Root)
+		}
+		// The task narrowed itself to read_file, so grep must be gone even
+		// though the agent's ceiling grants it.
+		if slices.Contains(claims.Grants.Tools(), "grep") {
+			t.Errorf("grants = %v, want grep dropped by narrowing", claims.Grants.Tools())
 		}
 		_ = pubSet // could also verify with Parse, but ParseInsecure is enough here
 	case <-time.After(time.Second):

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
@@ -123,9 +124,6 @@ func New(cfg Config) (*Server, error) {
 		}
 		tools = append(tools, AllOrchestrationTools(cfg.EQ, ns, cfg.MaxDispatchDepth)...)
 	}
-	if err := validateToolLegs(tools); err != nil {
-		return nil, fmt.Errorf("mcp: %w", err)
-	}
 	mcpSrv.AddTools(tools...)
 
 	// HTTPContextFunc fires on every request. The outer jwtMiddlewareHandler
@@ -209,21 +207,18 @@ func (s *Server) jwtMiddlewareHandler(skipVerification bool, next http.Handler) 
 	})
 }
 
-// legFilter is registered with WithToolFilter. It restricts tools/list to
-// those the session's legs cover, which is the same rule withLegCheck applies
-// per call: this is the visibility half, that one is the enforcement half.
+// legFilter is registered with WithToolFilter. It restricts tools/list to the
+// tools this session holds a grant for. withGrantCheck then decides, per
+// call, whether the arguments fall inside that grant's scope.
 func (s *Server) legFilter(ctx context.Context, tools []mcplib.Tool) []mcplib.Tool {
 	c := claimsFromContext(ctx)
 	if c == nil {
 		return nil
 	}
+	granted := c.Grants.Tools()
 	filtered := make([]mcplib.Tool, 0, len(tools))
 	for _, t := range tools {
-		need, ok := toolLegs[t.Name]
-		if !ok {
-			continue // untagged tools are never visible; New rejects them anyway
-		}
-		if c.Legs.Contains(need) {
+		if slices.Contains(granted, t.Name) {
 			filtered = append(filtered, t)
 		}
 	}

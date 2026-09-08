@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/shiblon/agentq/pkg/config"
@@ -99,12 +100,11 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 		kp = &mcp.KeyPair{Private: key}
 	}
 
-	legs, err := mcp.ParseLegs(agent.Legs)
-	if err != nil {
-		return fmt.Errorf("agent %q legs: %w", agentName, err)
-	}
-	if err := legs.Valid(); err != nil {
-		return fmt.Errorf("agent %q ceiling grants %w", agentName, err)
+	// Validate the ceiling at startup rather than on the first task. Grants
+	// are checked against a placeholder root so a scopeless grant, which is
+	// rooted at the task workdir later, still prices correctly here.
+	if err := rootAt(agent.Grants, "/agentq-startup-probe").Validate(); err != nil {
+		return fmt.Errorf("agent %q grants: %w", agentName, err)
 	}
 
 	var systemPrompt string
@@ -117,8 +117,8 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 		log.Printf("worker %s: loaded system prompt from %s", agentName, agent.PromptFile)
 	}
 
-	log.Printf("worker %s: claiming from %q, legs=%s (%d tools), runner=%s",
-		agentName, agent.Queue, legs, len(mcp.GrantableWith(legs)), agent.RunnerURL)
+	log.Printf("worker %s: claiming from %q, grants=%s, runner=%s",
+		agentName, agent.Queue, strings.Join(agent.Grants.Tools(), ","), agent.RunnerURL)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -132,7 +132,7 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 	workerCfg := agentqworker.Config{
 		Name:         agentName,
 		Description:  agent.Description,
-		Legs:         legs,
+		Grants:       agent.Grants,
 		PrivKey:      kp.Private,
 		Issuer:       issuer,
 		MCPAddr:      agent.MCPAddr,
@@ -170,4 +170,17 @@ func runWorkerServe(cmd *cobra.Command, _ []string) error {
 			return w.ProcessTask(ctx, task, appTask)
 		}),
 	).Run(ctx, eqworker.Watching(agent.Queue))
+}
+
+// rootAt fills in a root for any grant that did not name one, so a grant set
+// can be validated before any task supplies a workdir.
+func rootAt(grants mcp.GrantSet, root string) mcp.GrantSet {
+	out := make(mcp.GrantSet, len(grants))
+	for i, g := range grants {
+		if g.Scope.Root == "" {
+			g.Scope.Root = root
+		}
+		out[i] = g
+	}
+	return out
 }

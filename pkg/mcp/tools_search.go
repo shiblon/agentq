@@ -27,26 +27,25 @@ func grepTool() server.ServerTool {
 			mcplib.Description("Path to search within (default: session root)"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("grep",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("grep",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx)
 			pattern, err := req.RequireString("pattern")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
 			searchPath := "."
 			if p, ok := optionalStringArg(req, "path"); ok {
-				real, err := chrootPath(c.Workdir, p)
+				real, err := chrootPath(rootFromContext(ctx), p)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
-				rel, err := filepath.Rel(c.Workdir, real)
+				rel, err := filepath.Rel(rootFromContext(ctx), real)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
 				searchPath = rel
 			}
-			return runInWorkdir(ctx, c, "grep", "-rn", "--", pattern, searchPath)
+			return runInWorkdir(ctx, "grep", "-rn", "--", pattern, searchPath)
 		})}
 }
 
@@ -61,25 +60,24 @@ func findFilesTool() server.ServerTool {
 			mcplib.Description("Directory to search within (default: session root)"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("find_files",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("find_files",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx)
 			pattern, err := req.RequireString("pattern")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
 			searchPath := "."
 			if p, ok := optionalStringArg(req, "path"); ok {
-				real, err := chrootPath(c.Workdir, p)
+				real, err := chrootPath(rootFromContext(ctx), p)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
-				rel, err := filepath.Rel(c.Workdir, real)
+				rel, err := filepath.Rel(rootFromContext(ctx), real)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
 				searchPath = rel
 			}
-			return runInWorkdir(ctx, c, "find", searchPath, "-name", pattern)
+			return runInWorkdir(ctx, "find", searchPath, "-name", pattern)
 		})}
 }

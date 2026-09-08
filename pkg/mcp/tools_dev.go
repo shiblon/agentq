@@ -23,7 +23,7 @@ func echoTool() server.ServerTool {
 			mcplib.Description("Message to echo back"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("echo",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("echo",
 		func(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			msg, err := req.RequireString("message")
 			if err != nil {

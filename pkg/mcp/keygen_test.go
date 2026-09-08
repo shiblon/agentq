@@ -81,8 +81,7 @@ func roundTripMintParse(t *testing.T, kp *KeyPair, issuer string) {
 	raw, err := Mint(kp.Private, Claims{
 		Issuer:    issuer,
 		SessionID: "test-session",
-		Workdir:   "/work",
-		Legs:      Legs(Untrusted, Private),
+		Grants:    GrantSet{{Tool: "read_file", Scope: Scope{Root: "/work"}}, {Tool: "grep", Scope: Scope{Root: "/work"}}, {Tool: "git_log", Scope: Scope{Root: "/work"}}, {Tool: "list_directory", Scope: Scope{Root: "/work"}}},
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)

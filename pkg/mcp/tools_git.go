@@ -25,9 +25,9 @@ func gitStatusTool() server.ServerTool {
 	def := mcplib.NewTool("git_status",
 		mcplib.WithDescription("Show the working tree status."),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_status",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_status",
 		func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			return runInWorkdir(ctx, claimsFromContext(ctx), "git", "status")
+			return runInWorkdir(ctx, "git", "status")
 		})}
 }
 
@@ -38,13 +38,13 @@ func gitDiffTool() server.ServerTool {
 			mcplib.Description("Optional git diff arguments, e.g. '--staged' or a file path"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_diff",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_diff",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			args := []string{"diff"}
 			if extra, ok := optionalStringArg(req, "args"); ok {
 				args = append(args, extra)
 			}
-			return runInWorkdir(ctx, claimsFromContext(ctx), "git", args...)
+			return runInWorkdir(ctx, "git", args...)
 		})}
 }
 
@@ -56,25 +56,24 @@ func gitAddTool() server.ServerTool {
 			mcplib.Description("File path or '.' for all"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_add",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_add",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx)
 			path, err := req.RequireString("path")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
 			if path != "." {
-				real, err := chrootPath(c.Workdir, path)
+				real, err := chrootPath(rootFromContext(ctx), path)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
-				rel, err := filepath.Rel(c.Workdir, real)
+				rel, err := filepath.Rel(rootFromContext(ctx), real)
 				if err != nil {
 					return mcplib.NewToolResultError(err.Error()), nil
 				}
 				path = rel
 			}
-			return runInWorkdir(ctx, c, "git", "add", path)
+			return runInWorkdir(ctx, "git", "add", path)
 		})}
 }
 
@@ -86,13 +85,13 @@ func gitCommitTool() server.ServerTool {
 			mcplib.Description("Commit message"),
 		),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_commit",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_commit",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 			msg, err := req.RequireString("message")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
-			return runInWorkdir(ctx, claimsFromContext(ctx), "git", "commit", "-m", msg)
+			return runInWorkdir(ctx, "git", "commit", "-m", msg)
 		})}
 }
 
@@ -100,21 +99,20 @@ func gitLogTool() server.ServerTool {
 	def := mcplib.NewTool("git_log",
 		mcplib.WithDescription("Show recent commit history (last 20 commits, one line each)."),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_log",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_log",
 		func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			return runInWorkdir(ctx, claimsFromContext(ctx), "git", "log", "--oneline", "-20")
+			return runInWorkdir(ctx, "git", "log", "--oneline", "-20")
 		})}
 }
 
 func gitPushTool() server.ServerTool {
 	def := mcplib.NewTool("git_push",
-		mcplib.WithDescription("Push commits to a remote branch. Only branches in AllowedBranches are permitted."),
+		mcplib.WithDescription("Push commits to a remote branch. Only branches inside the grant scope are permitted."),
 		mcplib.WithString("remote", mcplib.Required(), mcplib.Description("Remote name, e.g. 'origin'")),
 		mcplib.WithString("branch", mcplib.Required(), mcplib.Description("Branch to push to")),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_push",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_push",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx)
 			remote, err := req.RequireString("remote")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
@@ -123,22 +121,21 @@ func gitPushTool() server.ServerTool {
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
-			if !branchAllowed(c.AllowedBranches, branch) {
+			if !branchAllowed(grantFromContext(ctx).Scope.Branches, branch) {
 				return mcplib.NewToolResultError("push to branch " + branch + " is not permitted by this session"), nil
 			}
-			return runInWorkdir(ctx, c, "git", "push", remote, branch)
+			return runInWorkdir(ctx, "git", "push", remote, branch)
 		})}
 }
 
 func gitPullTool() server.ServerTool {
 	def := mcplib.NewTool("git_pull",
-		mcplib.WithDescription("Pull commits from a remote branch. Only branches in AllowedBranches are permitted."),
+		mcplib.WithDescription("Pull commits from a remote branch. Only branches inside the grant scope are permitted."),
 		mcplib.WithString("remote", mcplib.Required(), mcplib.Description("Remote name, e.g. 'origin'")),
 		mcplib.WithString("branch", mcplib.Required(), mcplib.Description("Branch to pull from")),
 	)
-	return server.ServerTool{Tool: def, Handler: withLegCheck("git_pull",
+	return server.ServerTool{Tool: def, Handler: withGrantCheck("git_pull",
 		func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx)
 			remote, err := req.RequireString("remote")
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
@@ -147,10 +144,10 @@ func gitPullTool() server.ServerTool {
 			if err != nil {
 				return mcplib.NewToolResultError(err.Error()), nil
 			}
-			if !branchAllowed(c.AllowedBranches, branch) {
+			if !branchAllowed(grantFromContext(ctx).Scope.Branches, branch) {
 				return mcplib.NewToolResultError("pull from branch " + branch + " is not permitted by this session"), nil
 			}
-			return runInWorkdir(ctx, c, "git", "pull", remote, branch)
+			return runInWorkdir(ctx, "git", "pull", remote, branch)
 		})}
 }
 

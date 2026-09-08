@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,10 +32,10 @@ type Config struct {
 	// Description is the agent's role, injected as part of the system prompt.
 	Description string
 
-	// Legs is the ceiling of what this agent may do, in rule-of-two terms.
-	// A task may narrow it but never widen it, and the tools that ceiling
-	// admits are derived from it rather than listed.
-	Legs mcp.LegSet
+	// Grants is the ceiling of what this agent may do. A task may drop
+	// grants but never add one. Grants with no scope root are rooted at the
+	// task's workdir when the token is minted.
+	Grants mcp.GrantSet
 
 	// PrivKey is the RSA private key used to sign MCP session JWTs.
 	PrivKey jwk.Key
@@ -67,10 +68,10 @@ type Payload struct {
 	// Set by the Supervisor based on the session's working directory.
 	Workdir string `json:"workdir"`
 
-	// Legs, if non-empty, narrows this task to fewer legs than the agent's
-	// configured ceiling. Naming a leg the ceiling lacks is refused rather
-	// than ignored: attenuation only, never widening.
-	Legs []string `json:"legs,omitempty"`
+	// Tools, if non-empty, narrows this task to the named subset of the
+	// agent's grants. Naming a tool the ceiling does not grant is refused
+	// rather than ignored: attenuation only, never widening.
+	Tools []string `json:"tools,omitempty"`
 
 	// ParentSessionID is the plain session ID (not URI) of the supervisor session
 	// that dispatched this task via dispatch_to_agent. Set by that tool; used by
@@ -121,8 +122,9 @@ func (w *Worker) getPrivKey() jwk.Key {
 // worker framework pre-unmarshals task.Value into appTask before calling here.
 // It:
 //  1. Extracts the typed Payload from appTask.
-//  2. Narrows Config.Legs by Payload.Legs, refusing any widening.
-//  3. Mints an MCP session JWT with those legs and the workdir.
+//  2. Narrows Config.Grants by Payload.Tools, refusing any widening, and
+//     roots any scopeless grant at the task's workdir.
+//  3. Mints an MCP session JWT carrying those grants.
 //  4. Calls the runner via HTTP.
 //  5. Returns EntroQ modifications: insert result task + delete claimed task.
 func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask models.Task) ([]entroq.ModifyArg, error) {
@@ -134,16 +136,16 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 		return nil, fmt.Errorf("agentq %s: task missing messages", w.cfg.Name)
 	}
 
-	effectiveLegs, err := narrow(w.cfg.Legs, payload.Legs)
+	grants, err := narrow(w.cfg.Grants, payload.Tools)
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: %w", w.cfg.Name, err)
 	}
+	grants = rootAt(grants, payload.Workdir)
 
 	jwt, err := mcp.Mint(w.getPrivKey(), mcp.Claims{
 		Issuer:    w.cfg.Issuer,
 		SessionID: appTask.SessionURI,
-		Workdir:   payload.Workdir,
-		Legs:      effectiveLegs,
+		Grants:    grants,
 		Depth:     payload.Depth,
 		Expiry:    time.Now().Add(2 * time.Hour),
 	})
@@ -154,7 +156,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *entroq.Task, appTask mod
 	output, err := w.callRunner(ctx, runner.RunRequest{
 		JWT:          jwt,
 		Messages:     payload.Messages,
-		SystemPrompt: w.systemPrompt(effectiveLegs),
+		SystemPrompt: w.systemPrompt(grants),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentq %s: runner: %w", w.cfg.Name, err)
@@ -232,10 +234,9 @@ func (w *Worker) callRunner(ctx context.Context, req runner.RunRequest) (string,
 }
 
 // systemPrompt returns the system prompt for this agent. If Config.SystemPrompt
-// is set (loaded from prompt_file), it is used as the base and the tools the
-// session's legs admit are appended. Otherwise a generic identity prompt is
-// generated.
-func (w *Worker) systemPrompt(legs mcp.LegSet) string {
+// is set (loaded from prompt_file), it is used as the base and the granted
+// tools are appended. Otherwise a generic identity prompt is generated.
+func (w *Worker) systemPrompt(grants mcp.GrantSet) string {
 	var base string
 	if w.cfg.SystemPrompt != "" {
 		base = w.cfg.SystemPrompt
@@ -250,29 +251,47 @@ func (w *Worker) systemPrompt(legs mcp.LegSet) string {
 		}
 		base = sb.String()
 	}
-	tools := mcp.GrantableWith(legs)
+	tools := grants.Tools()
 	if len(tools) > 0 {
 		return base + "\n\nAvailable MCP tools: " + strings.Join(tools, ", ") + ".\nUse only these tools. Do not use any other tools."
 	}
 	return base + "\n\nYou have no MCP tools available. Respond using only your own knowledge."
 }
 
-// narrow returns ceiling restricted to the legs named in want. An empty want
-// leaves the ceiling untouched. Naming a leg the ceiling does not hold is an
-// error rather than a silent drop, so a task that asks for more than it may
-// have fails loudly at the only place authority is granted.
-func narrow(ceiling mcp.LegSet, want []string) (mcp.LegSet, error) {
+// narrow returns ceiling restricted to grants for the named tools. An empty
+// want leaves the ceiling untouched. Naming a tool the ceiling does not grant
+// is an error rather than a silent drop, so a task asking for more than it may
+// have fails at the only place authority is granted.
+func narrow(ceiling mcp.GrantSet, want []string) (mcp.GrantSet, error) {
 	if len(want) == 0 {
 		return ceiling, nil
 	}
-	asked, err := mcp.ParseLegs(want)
-	if err != nil {
-		return 0, fmt.Errorf("task legs: %w", err)
+	granted := ceiling.Tools()
+	for _, name := range want {
+		if !slices.Contains(granted, name) {
+			return nil, fmt.Errorf("task asks for %q but this agent grants only %s", name, strings.Join(granted, ", "))
+		}
 	}
-	if !ceiling.Contains(asked) {
-		return 0, fmt.Errorf("task asks for %s but this agent's ceiling is %s", asked, ceiling)
+	out := make(mcp.GrantSet, 0, len(ceiling))
+	for _, g := range ceiling {
+		if slices.Contains(want, g.Tool) {
+			out = append(out, g)
+		}
 	}
-	return asked, nil
+	return out, nil
+}
+
+// rootAt fills in the workdir for any grant that did not name a root of its
+// own. Trusted mounts carry absolute roots and are left alone.
+func rootAt(grants mcp.GrantSet, workdir string) mcp.GrantSet {
+	out := make(mcp.GrantSet, len(grants))
+	for i, g := range grants {
+		if g.Scope.Root == "" {
+			g.Scope.Root = workdir
+		}
+		out[i] = g
+	}
+	return out
 }
 
 // remarshal round-trips v through JSON to populate dst. Used to convert a

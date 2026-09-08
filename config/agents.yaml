@@ -38,12 +38,19 @@ agents:
     prompt_file: config/prompts/coder.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    # A coder must both read the tree and change it, which is already two
-    # legs, so it may not also ingest anything it did not author. Give it
-    # paths to work on rather than letting it go looking.
-    legs:
-      - private
-      - mutate
+    # A coder changes its own tree, which costs private+mutate, so it may
+    # not also ingest content it did not author. It reads reference material
+    # from a trusted mount instead: that costs only private, because the
+    # operator wrote what is there and no grant here can write it.
+    grants:
+      - tool: write_file
+      - tool: create_directory
+      - tool: git_add
+      - tool: git_commit
+      - tool: read_file
+        scope:
+          root: /opt/agentq/reference
+          trusted: true
 
   # reviewer: ingests code and reports; never changes anything.
   - name: reviewer
@@ -52,9 +59,13 @@ agents:
     prompt_file: config/prompts/reviewer.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    legs:
-      - untrusted
-      - private
+    grants:
+      - tool: read_file
+      - tool: list_directory
+      - tool: grep
+      - tool: find_files
+      - tool: git_diff
+      - tool: git_log
 
   # researcher: ingests documentation and reports; touches nothing.
   - name: researcher
@@ -63,6 +74,7 @@ agents:
     prompt_file: config/prompts/researcher.txt
     runner_url: http://localhost:8082
     mcp_addr: http://localhost:8081
-    legs:
-      - untrusted
-      - private
+    grants:
+      - tool: read_file
+      - tool: list_directory
+      - tool: grep

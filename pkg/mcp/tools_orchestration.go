@@ -48,8 +48,9 @@ func dispatchToAgentTool(eq *entroq.EntroQ, namespace string, maxDepth int) serv
 	)
 	return server.ServerTool{
 		Tool: def,
-		Handler: withLegCheck("dispatch_to_agent", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			c := claimsFromContext(ctx) // non-nil guaranteed by withLegCheck
+		Handler: withGrantCheck("dispatch_to_agent", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+
+			c := claimsFromContext(ctx) // non-nil guaranteed by withGrantCheck
 
 			if maxDepth > 0 && c.Depth >= maxDepth {
 				return mcplib.NewToolResultError(fmt.Sprintf(

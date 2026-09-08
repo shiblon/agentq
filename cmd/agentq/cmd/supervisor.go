@@ -50,7 +50,7 @@ func init() {
 	supervisorServeCmd.Flags().String("issuer", "agentq", "Issuer claim placed in minted JWTs")
 	supervisorServeCmd.Flags().String("runner-url", "", "Base URL of the runner microservice, e.g. http://runner:8082")
 	supervisorServeCmd.Flags().String("mcp-addr", "", "Base URL of the MCP pool server (must have dispatch_to_agent registered)")
-	supervisorServeCmd.Flags().String("legs", "private,mutate", "Comma-separated rule-of-two legs the supervisor may exercise: untrusted, private, mutate (at most two)")
+	supervisorServeCmd.Flags().StringSlice("grant-tool", []string{"dispatch_to_agent"}, "Tools the supervisor is granted; repeat or comma-separate")
 	supervisorServeCmd.Flags().String("default-workdir", "", "Fallback workdir when session has no workspace configured")
 	supervisorServeCmd.Flags().String("prompt", "", "System prompt for the supervisor (overrides built-in default)")
 	supervisorServeCmd.Flags().String("prompt-file", "", "Path to a file containing the supervisor system prompt")
@@ -69,7 +69,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 	issuer, _ := cmd.Flags().GetString("issuer")
 	runnerURL, _ := cmd.Flags().GetString("runner-url")
 	mcpAddr, _ := cmd.Flags().GetString("mcp-addr")
-	legsStr, _ := cmd.Flags().GetString("legs")
+	grantTools, _ := cmd.Flags().GetStringSlice("grant-tool")
 	defaultWorkdir, _ := cmd.Flags().GetString("default-workdir")
 	prompt, _ := cmd.Flags().GetString("prompt")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
@@ -92,18 +92,14 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--key-file and --insecure-no-keys are mutually exclusive")
 	}
 
-	var legNames []string
-	for _, t := range strings.Split(legsStr, ",") {
+	var grants mcp.GrantSet
+	for _, t := range grantTools {
 		if t = strings.TrimSpace(t); t != "" {
-			legNames = append(legNames, t)
+			grants = append(grants, mcp.Grant{Tool: t})
 		}
 	}
-	legs, legErr := mcp.ParseLegs(legNames)
-	if legErr != nil {
-		return fmt.Errorf("supervisor legs: %w", legErr)
-	}
-	if err := legs.Valid(); err != nil {
-		return fmt.Errorf("supervisor ceiling grants %w", err)
+	if err := rootAt(grants, "/agentq-startup-probe").Validate(); err != nil {
+		return fmt.Errorf("supervisor grants: %w", err)
 	}
 
 	var (
@@ -143,7 +139,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		log.Printf("supervisor: session provenance verification disabled (set --provenance-key to enable)")
 	}
 
-	log.Printf("supervisor: claiming from %q, runner=%s, mcp=%s, legs=%s", queue, runnerURL, mcpAddr, legs)
+	log.Printf("supervisor: claiming from %q, runner=%s, mcp=%s, grants=%s", queue, runnerURL, mcpAddr, strings.Join(grants.Tools(), ","))
 
 	// Load agent roster and build system prompt.
 	agentCfg, err := config.Load(viper.GetString("config"))
@@ -160,7 +156,7 @@ func runSupervisorServe(cmd *cobra.Command, _ []string) error {
 		PrivKey:            kp.Private,
 		MCPAddr:            mcpAddr,
 		RunnerURL:          runnerURL,
-		Legs:               legs,
+		Grants:             grants,
 		DefaultWorkdir:     defaultWorkdir,
 		SystemPrompt:       supervisor.BuildSystemPrompt(prompt, agentInfos),
 		MaxDispatches:      maxDispatches,

@@ -33,9 +33,10 @@ func (s *testSession) callTool(t *testing.T, name string, args map[string]any) *
 }
 
 // newTestSession starts a Server backed by a temp directory, mints a JWT
-// granting legs, and returns a connected, initialized client.
+// granting the named tools over that directory, and returns a connected,
+// initialized client.
 // All cleanup is registered with t.Cleanup.
-func newTestSession(t *testing.T, legs LegSet) *testSession {
+func newTestSession(t *testing.T, tools ...string) *testSession {
 	t.Helper()
 	priv, pubSet := testKeyPair(t)
 	dir := t.TempDir()
@@ -50,8 +51,7 @@ func newTestSession(t *testing.T, legs LegSet) *testSession {
 	tok, err := Mint(priv, Claims{
 		Issuer:    "agentq",
 		SessionID: t.Name(),
-		Workdir:   dir,
-		Legs:      legs,
+		Grants:    grantsOver(dir, tools...),
 	})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -85,11 +85,11 @@ func newTestSession(t *testing.T, legs LegSet) *testSession {
 
 // -- tools/list ---------------------------------------------------------------
 
-func TestIntegration_ToolsListFilteredByLegs(t *testing.T) {
+func TestIntegration_ToolsListFilteredByGrants(t *testing.T) {
 	// Legs, not names, decide visibility: an ingesting session sees every
 	// reading tool and no mutating one, without either list being written
 	// down anywhere.
-	sess := newTestSession(t, Legs(Untrusted, Private))
+	sess := newTestSession(t, "read_file", "list_directory", "grep", "git_diff", "git_log")
 
 	result, err := sess.client.ListTools(sess.ctx, mcplib.ListToolsRequest{})
 	if err != nil {
@@ -128,7 +128,7 @@ func toolNamesOf(tools []mcplib.Tool) []string {
 // -- read_file ----------------------------------------------------------------
 
 func TestIntegration_ReadFile_Success(t *testing.T) {
-	sess := newTestSession(t, Legs(Untrusted, Private))
+	sess := newTestSession(t, "read_file", "list_directory", "grep", "git_diff", "git_log")
 
 	if err := os.WriteFile(filepath.Join(sess.dir, "hello.txt"), []byte("world"), 0644); err != nil {
 		t.Fatalf("setup: %v", err)
@@ -145,7 +145,7 @@ func TestIntegration_ReadFile_Success(t *testing.T) {
 
 func TestIntegration_ReadFile_LegsNotCovered(t *testing.T) {
 	// A mutating session holds private+mutate, so it cannot ingest content.
-	sess := newTestSession(t, Legs(Private, Mutate))
+	sess := newTestSession(t, "write_file", "create_directory")
 
 	result := sess.callTool(t, "read_file", map[string]any{"path": "/anything.txt"})
 	if !result.IsError {
@@ -156,7 +156,7 @@ func TestIntegration_ReadFile_LegsNotCovered(t *testing.T) {
 // -- write_file ---------------------------------------------------------------
 
 func TestIntegration_WriteFile_Success(t *testing.T) {
-	sess := newTestSession(t, Legs(Private, Mutate))
+	sess := newTestSession(t, "write_file", "create_directory")
 
 	result := sess.callTool(t, "write_file", map[string]any{
 		"path":    "/output/result.txt",
@@ -177,7 +177,7 @@ func TestIntegration_WriteFile_Success(t *testing.T) {
 }
 
 func TestIntegration_WriteFile_NotInAllowlist(t *testing.T) {
-	sess := newTestSession(t, Legs(Untrusted, Private))
+	sess := newTestSession(t, "read_file", "list_directory", "grep", "git_diff", "git_log")
 
 	result := sess.callTool(t, "write_file", map[string]any{"path": "/out.txt", "content": "blocked"})
 	if !result.IsError {
@@ -192,7 +192,7 @@ func TestIntegration_WriteFile_NotInAllowlist(t *testing.T) {
 // -- list_directory -----------------------------------------------------------
 
 func TestIntegration_ListDirectory_Success(t *testing.T) {
-	sess := newTestSession(t, Legs(Untrusted, Private))
+	sess := newTestSession(t, "read_file", "list_directory", "grep", "git_diff", "git_log")
 
 	if err := os.WriteFile(filepath.Join(sess.dir, "a.go"), []byte(""), 0644); err != nil {
 		t.Fatalf("setup: %v", err)
@@ -217,7 +217,7 @@ func TestIntegration_ListDirectory_Success(t *testing.T) {
 // -- create_directory ---------------------------------------------------------
 
 func TestIntegration_CreateDirectory_Success(t *testing.T) {
-	sess := newTestSession(t, Legs(Private, Mutate))
+	sess := newTestSession(t, "write_file", "create_directory")
 
 	result := sess.callTool(t, "create_directory", map[string]any{"path": "/new/nested/dir"})
 	if result.IsError {
@@ -227,4 +227,19 @@ func TestIntegration_CreateDirectory_Success(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sess.dir, "new", "nested", "dir")); err != nil {
 		t.Errorf("directory not created on filesystem: %v", err)
 	}
+}
+
+// grantsOver builds a grant per tool, all rooted at dir, filling in the scope
+// each tool needs to be priceable.
+func grantsOver(dir string, tools ...string) GrantSet {
+	gs := make(GrantSet, 0, len(tools))
+	for _, tool := range tools {
+		g := Grant{Tool: tool, Scope: Scope{Root: dir}}
+		switch tool {
+		case "git_push":
+			g.Scope.Branches = []string{"*"}
+		}
+		gs = append(gs, g)
+	}
+	return gs
 }
