@@ -9,7 +9,7 @@
 #
 # Outputs:
 #   AGENTQ_CLIENT_ID    -- device-flow client for humans (agentq login)
-#   SUPERVISOR_CLIENT_ID / SUPERVISOR_CLIENT_SECRET -- for agentq run --client-id/--client-secret
+#   SUPERVISOR_CLIENT_ID / SUPERVISOR_CLIENT_SECRET -- for agentq supervisor serve --client-id/--client-secret
 #
 # Prerequisites: curl, jq
 

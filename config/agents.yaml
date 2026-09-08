@@ -1,14 +1,11 @@
 # config/agents.yaml -- agentq agent configuration.
 #
-# Run all agents in one command:
-#   agentq run --all --config config/agents.yaml
+# Each agent runs its own worker, which claims from the agent's inbox queue,
+# mints an MCP session JWT, and dispatches to the runner:
+#   agentq worker serve --agent coder --key-file private.jwk
 #
-# Or run individual agents:
-#   agentq run --agent supervisor --config config/agents.yaml
-#   agentq run --agent coder      --config config/agents.yaml
-#
-# The supervisor uses an LLM to route tasks between agents:
-#   agentq run --agent supervisor --llm-addr http://localhost:11434 --llm-model llama3
+# The supervisor is started separately and uses an LLM to route tasks:
+#   agentq supervisor serve --llm-addr http://localhost:11434 --llm-model llama3
 #
 # Token exchange (delegates human identity to agents):
 #   agentq run --agent supervisor \
@@ -67,12 +64,3 @@ agents:
     tools:
       - read_file
       - list_directory
-
-  # Legacy exec-worker entries kept for backward compatibility.
-  # Remove once all workers have migrated to the AgentQ/runner model.
-  - name: coder-legacy
-    queue: coder_queue
-    description: Legacy exec-worker coder (subprocess model).
-    prompt_file: config/prompts/coder.txt
-    cmd: claude --print
-    approval_suffix: --dangerously-skip-permissions

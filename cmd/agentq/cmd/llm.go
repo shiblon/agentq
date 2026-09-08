@@ -14,13 +14,10 @@ var llmCmd = &cobra.Command{
 	Use:   "llm",
 	Short: "Send stdin to an LLM and print the response to stdout",
 	Long: `Reads a prompt from stdin, sends it to an LLM, and writes the response
-to stdout. Useful as the --cmd for agentq agent add when using a local model.
+to stdout. Useful for checking that a local model is reachable and answering.
 
 Example:
-  agentq agent add --name=coder --queue=coder_queue \
-    --description="Writes and edits code" \
-    --prompt-file=config/prompts/coder.txt \
-    --cmd="agentq llm --addr=http://localhost:11434 --model=qwen2.5-coder:7b"`,
+  echo "say hello" | agentq llm --addr=http://localhost:11434 --model=qwen2.5-coder:7b`,
 	RunE: runLLM,
 }
 

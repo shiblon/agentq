@@ -25,10 +25,6 @@ type Agent struct {
 	Description string `yaml:"description" json:"description"`
 	PromptFile  string `yaml:"prompt_file,omitempty" json:"prompt_file,omitempty"`
 
-	// Cmd and ApprovalSuffix are used by the legacy exec worker.
-	Cmd            string `yaml:"cmd,omitempty"            json:"cmd,omitempty"`
-	ApprovalSuffix string `yaml:"approval_suffix,omitempty" json:"approval_suffix,omitempty"`
-
 	// RunnerURL is the base URL of the runner microservice for this agent type.
 	RunnerURL string `yaml:"runner_url,omitempty" json:"runner_url,omitempty"`
 
@@ -148,12 +144,6 @@ func (c *Config) Update(name string, patch Agent) error {
 		}
 		if patch.PromptFile != "" {
 			c.Agents[i].PromptFile = patch.PromptFile
-		}
-		if patch.Cmd != "" {
-			c.Agents[i].Cmd = patch.Cmd
-		}
-		if patch.ApprovalSuffix != "" {
-			c.Agents[i].ApprovalSuffix = patch.ApprovalSuffix
 		}
 		return nil
 	}

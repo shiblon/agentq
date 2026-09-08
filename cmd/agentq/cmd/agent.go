@@ -2,13 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/shiblon/agentq/pkg/config"
-	"github.com/shiblon/agentq/pkg/workers/exec"
-	"github.com/shiblon/entroq"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -42,23 +40,14 @@ var agentUpdateCmd = &cobra.Command{
 	RunE:  runAgentUpdate,
 }
 
-var agentRunCmd = &cobra.Command{
-	Use:   "run <name>",
-	Short: "Start the worker for a named agent persona",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAgentRun,
-}
-
 func init() {
 	rootCmd.AddCommand(agentCmd)
-	agentCmd.AddCommand(agentAddCmd, agentListCmd, agentRemoveCmd, agentUpdateCmd, agentRunCmd)
+	agentCmd.AddCommand(agentAddCmd, agentListCmd, agentRemoveCmd, agentUpdateCmd)
 
 	agentAddCmd.Flags().String("name", "", "Agent name, short lowercase (required)")
-	agentAddCmd.Flags().String("queue", "", "Queue to claim from, e.g. coder_queue (required)")
+	agentAddCmd.Flags().String("queue", "", "Queue to claim from, e.g. agentq/coder/inbox (required)")
 	agentAddCmd.Flags().String("description", "", "One-line description used by supervisor for routing (required)")
 	agentAddCmd.Flags().String("prompt-file", "", "Path to system prompt file (optional)")
-	agentAddCmd.Flags().String("cmd", "", "Shell command to run for each task (optional, required for exec workers)")
-	agentAddCmd.Flags().String("approval-flag", "", "Suffix appended to cmd when supervisor grants approval, e.g. --dangerously-skip-permissions")
 	agentAddCmd.MarkFlagRequired("name")
 	agentAddCmd.MarkFlagRequired("queue")
 	agentAddCmd.MarkFlagRequired("description")
@@ -70,8 +59,6 @@ func init() {
 	agentUpdateCmd.Flags().String("queue", "", "New queue name")
 	agentUpdateCmd.Flags().String("description", "", "New description")
 	agentUpdateCmd.Flags().String("prompt-file", "", "New prompt file path")
-	agentUpdateCmd.Flags().String("cmd", "", "New shell command")
-	agentUpdateCmd.Flags().String("approval-flag", "", "New approval suffix")
 	agentUpdateCmd.MarkFlagRequired("name")
 }
 
@@ -86,16 +73,12 @@ func runAgentAdd(cmd *cobra.Command, args []string) error {
 	queue, _ := cmd.Flags().GetString("queue")
 	desc, _ := cmd.Flags().GetString("description")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
-	agentCmd, _ := cmd.Flags().GetString("cmd")
-	approvalFlag, _ := cmd.Flags().GetString("approval-flag")
 
 	if err := cfg.Add(config.Agent{
-		Name:           name,
-		Queue:          queue,
-		Description:    desc,
-		PromptFile:     promptFile,
-		Cmd:            agentCmd,
-		ApprovalSuffix: approvalFlag,
+		Name:        name,
+		Queue:       queue,
+		Description: desc,
+		PromptFile:  promptFile,
 	}); err != nil {
 		return err
 	}
@@ -121,9 +104,13 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tQUEUE\tDESCRIPTION\tCMD")
+	fmt.Fprintln(w, "NAME\tQUEUE\tTOOLS\tDESCRIPTION")
 	for _, a := range cfg.Agents {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Queue, a.Description, a.Cmd)
+		tools := "none"
+		if len(a.Tools) > 0 {
+			tools = strings.Join(a.Tools, ",")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Name, a.Queue, tools, a.Description)
 	}
 	return w.Flush()
 }
@@ -140,15 +127,11 @@ func runAgentUpdate(cmd *cobra.Command, args []string) error {
 	queue, _ := cmd.Flags().GetString("queue")
 	desc, _ := cmd.Flags().GetString("description")
 	promptFile, _ := cmd.Flags().GetString("prompt-file")
-	agentCmd, _ := cmd.Flags().GetString("cmd")
-	approvalFlag, _ := cmd.Flags().GetString("approval-flag")
 
 	if err := cfg.Update(name, config.Agent{
-		Queue:          queue,
-		Description:    desc,
-		PromptFile:     promptFile,
-		Cmd:            agentCmd,
-		ApprovalSuffix: approvalFlag,
+		Queue:       queue,
+		Description: desc,
+		PromptFile:  promptFile,
 	}); err != nil {
 		return err
 	}
@@ -178,64 +161,4 @@ func runAgentRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("removed agent %q\n", name)
 	return nil
-}
-
-func runAgentRun(cmd *cobra.Command, args []string) error {
-	name := args[0]
-	configFile := viper.GetString("config")
-
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return err
-	}
-
-	a, ok := cfg.Get(name)
-	if !ok {
-		return fmt.Errorf("agent %q not found in %s", name, configFile)
-	}
-	if a.Cmd == "" {
-		return fmt.Errorf("agent %q has no cmd configured", name)
-	}
-
-	ctx := cmd.Context()
-	eq, err := openEQ(ctx)
-	if err != nil {
-		return err
-	}
-	defer eq.Close()
-
-	var opts []exec.Option
-	if a.PromptFile != "" {
-		opts = append(opts, exec.WithPromptFile(a.PromptFile))
-		log.Printf("agent %s: prompt file %q", name, a.PromptFile)
-	}
-	if a.ApprovalSuffix != "" {
-		opts = append(opts, exec.WithApprovalSuffix(a.ApprovalSuffix))
-		log.Printf("agent %s: approval suffix %q", name, a.ApprovalSuffix)
-	}
-
-	w := exec.New(name, a.Cmd, eq, opts...)
-	log.Printf("agent %s: claiming from %q, cmd=%q", name, a.Queue, a.Cmd)
-
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		task, err := eq.Claim(ctx, entroq.From(a.Queue))
-		if err != nil {
-			if entroq.IsCanceled(err) {
-				return nil
-			}
-			log.Printf("agent %s: claim error: %v", name, err)
-			continue
-		}
-		mods, err := w.ProcessTask(ctx, task)
-		if err != nil {
-			log.Printf("agent %s: process error (attempt %d): %v", name, task.Attempt+1, err)
-			mods = []entroq.ModifyArg{retryMod(task, err.Error())}
-		}
-		if _, err := eq.Modify(ctx, mods...); err != nil {
-			log.Printf("agent %s: modify error: %v", name, err)
-		}
-	}
 }

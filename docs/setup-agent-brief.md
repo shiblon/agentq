@@ -50,7 +50,7 @@ Ask:
 
 For each persona, establish:
 - **Name**: short, lowercase, no spaces (e.g., `coder`, `doc_writer`, `reviewer`)
-- **Queue name**: conventionally `<name>_queue` (e.g., `coder_queue`)
+- **Queue name**: conventionally `agentq/<name>/inbox` (e.g., `agentq/coder/inbox`)
 - **System prompt**: a paragraph describing the agent's role, style, and
   constraints. Propose one based on the persona name and let the user edit it.
 
@@ -95,27 +95,27 @@ All agentq services use the same published image. The role is determined by the 
 
 ```
 docker run ghcr.io/shiblon/entroq-mem:v1.0.1 serve --port=<port>  # eq server
-agentq run --agent=<name>       # built-in worker (supervisor, or mock agents)
-agentq exec --agent=<name> \
-  --queue=<queue> \
-  --cmd="<cli command>" \
-  --prompt-file=<path>          # worker that delegates to an external CLI
+agentq supervisor serve         # orchestrator
+agentq worker serve --agent=<name> --key-file=private.jwk
+                                # one worker per persona
+agentq runner serve --command=claude --mcp-addr=<url>
+                                # launches the agent CLI
+agentq mcp serve --jwks-file=public.jwks
+                                # the tool sandbox agents call into
 agentq submit --prompt="..."    # submit a task (testing / scripting)
 agentq inspect <session-id>     # print session state as JSON
 ```
 
-`agentq exec` is the recommended way to run real agent personas. It claims
-tasks, builds context from the session, and pipes it to any CLI tool via stdin,
-capturing stdout as the result artifact. Two common patterns:
+A persona's worker claims from its inbox queue, mints an MCP session JWT
+carrying that agent's workdir and tool allowlist, and posts the task to the
+runner. The runner launches the agent CLI with no built-in tools of its own,
+so every capability the agent has comes from the session token and nothing
+else. Tools are served by `agentq mcp serve`, which enforces the allowlist on
+both `tools/list` and each call.
 
-- **Claude CLI** (no API account needed): `--cmd "claude --print"`
-  Works well for individual or small-team deployments. The worker runs as the
-  user who owns the Claude CLI session.
-
-- **API client script** (recommended for multi-worker deployments):
-  `--cmd "python3 scripts/call_api.py"` or similar. More appropriate when
-  running many workers in parallel, where per-user CLI sessions would be
-  awkward.
+Generate the signing keys once with `agentq mcp keygen`: the worker holds
+`private.jwk` to mint tokens, the MCP server holds `public.jwks` to verify
+them.
 
 (To build from source instead, see the appendix at the end of this document.)
 
@@ -140,8 +140,8 @@ the supervisor's routing config and the `--agent` flag passed to each worker.
 
 Built-in queue: `supervisor` (always present; do not rename).
 
-For each user-defined persona, the convention is `<name>_queue`. Example:
-a persona named `coder` claims from `coder_queue`.
+For each user-defined persona, the convention is `agentq/<name>/inbox`. Example:
+a persona named `coder` claims from `agentq/coder/inbox`.
 
 ### System prompts
 
@@ -156,7 +156,7 @@ config/prompts/reviewer.txt
 ```
 
 Mount these into the container (or bake them into the image) and pass the
-path via the `--prompt-file` flag on `agentq exec`.
+path via the `prompt_file` field in `agents.yaml`.
 
 The supervisor's routing system prompt is internal to agentq and does not
 need a file.
