@@ -29,6 +29,9 @@ func main() {
 	flag.String("input-format", "stream-json", "accepted, ignored")
 	flag.String("output-format", "stream-json", "accepted, ignored")
 	flag.Bool("verbose", false, "accepted, ignored")
+	flag.String("tools", "", "accepted, ignored")
+	flag.Bool("strict-mcp-config", false, "accepted, ignored")
+	flag.String("permission-prompts", "", "accepted, ignored")
 	flag.Parse()
 
 	if err := run(*mcpConfigPath); err != nil {

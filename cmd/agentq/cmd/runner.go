@@ -37,7 +37,7 @@ func init() {
 
 	runnerServeCmd.Flags().String("addr", ":8082", "TCP listen address")
 	runnerServeCmd.Flags().String("command", "claude", "Agent binary to invoke")
-	runnerServeCmd.Flags().StringSlice("args", []string{"--print"}, "Fixed arguments passed to command before --mcp-config")
+	runnerServeCmd.Flags().StringSlice("args", []string{"--print"}, "Fixed arguments passed to command before the runner's containment flags, which are appended afterwards and cannot be overridden here")
 	runnerServeCmd.Flags().String("mcp-addr", "http://localhost:8081", "Base URL of the MCP pool server")
 }
 

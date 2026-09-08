@@ -26,6 +26,9 @@ type Config struct {
 	// Args are fixed arguments passed to Command before the runner's own
 	// required flags (--mcp-config, --input-format, etc.),
 	// e.g. []string{"--print"}.
+	//
+	// Args cannot grant the agent any capability: the containment flags in
+	// run are appended afterwards, so they win on any conflict.
 	Args []string
 
 	// MCPAddr is the base URL of the MCP pool server,
@@ -118,12 +121,19 @@ func (r *Runner) run(ctx context.Context, task RunRequest) (string, error) {
 	// are required for structured I/O with the claude CLI.
 	// NOTE: --verbose is currently required by claude when combining
 	// --print with --output-format stream-json. Revisit if that changes.
-	args := make([]string, len(r.cfg.Args), len(r.cfg.Args)+8)
+	args := make([]string, len(r.cfg.Args), len(r.cfg.Args)+14)
 	copy(args, r.cfg.Args)
 	if task.SystemPrompt != "" {
 		args = append(args, "--system-prompt", task.SystemPrompt)
 	}
+	// Containment flags. The session JWT is the only thing permitted to grant
+	// a capability, so the agent gets no built-in tools of its own, no MCP
+	// server but ours, and no permission prompt it could block on with nobody
+	// present to answer. These are appended last and are not configurable.
 	args = append(args,
+		"--tools", "",
+		"--strict-mcp-config",
+		"--permission-prompts", "none",
 		"--mcp-config", cfgFile,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
