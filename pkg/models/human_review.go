@@ -5,11 +5,11 @@ package models
 // The task is inserted by the requesting agent; the reply_queue tells the
 // human reviewer where to post the outcome.
 type HumanReviewRequest struct {
-	SessionURI      string `json:"session_uri"`       // doc:sessions/<id>
-	RequestingAgent string `json:"requesting_agent"`   // agent that needs review
-	Reason          string `json:"reason"`             // why human input is needed
-	ReplyQueue      string `json:"reply_queue"`        // where to post HumanReviewReply
-	ContextSummary  string `json:"context_summary"`    // brief description for the reviewer
+	SessionURI      string `json:"session_uri"`                // doc:sessions/<id>
+	RequestingAgent string `json:"requesting_agent"`           // agent that needs review
+	Reason          string `json:"reason"`                     // why human input is needed
+	ReplyQueue      string `json:"reply_queue"`                // where to post HumanReviewReply
+	ContextSummary  string `json:"context_summary"`            // brief description for the reviewer
 	ProvenanceToken string `json:"provenance_token,omitempty"` // carried through for reply routing
 }
 
@@ -19,10 +19,10 @@ type HumanReviewRequest struct {
 type HumanReviewReply struct {
 	// Type is always "review_reply". The supervisor uses this to distinguish
 	// review replies from normal dispatch tasks in the same queue.
-	Type         string `json:"type"`
-	SessionURI   string `json:"session_uri"`    // same as the original request
-	Outcome      string `json:"outcome"`        // "approved", "rejected", "input_provided"
-	HumanInput   string `json:"human_input"`    // free-form text from the human
+	Type            string `json:"type"`
+	SessionURI      string `json:"session_uri"`                // same as the original request
+	Outcome         string `json:"outcome"`                    // "approved", "rejected", "input_provided"
+	HumanInput      string `json:"human_input"`                // free-form text from the human
 	ReviewTaskID    string `json:"review_task_id"`             // ID of the human_review task that was handled
 	ProvenanceToken string `json:"provenance_token,omitempty"` // carried from request for supervisor routing
 }

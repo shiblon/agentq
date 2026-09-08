@@ -40,11 +40,11 @@ type clientCredentials struct {
 // Reload -- for example in response to SIGHUP when using Vault Agent sidecar
 // rotation.
 type TokenExchanger struct {
-	tokenURL       string
-	clientIDFile   string // empty when credentials were provided directly
+	tokenURL         string
+	clientIDFile     string // empty when credentials were provided directly
 	clientSecretFile string
-	creds          atomic.Pointer[clientCredentials]
-	httpClient     *http.Client
+	creds            atomic.Pointer[clientCredentials]
+	httpClient       *http.Client
 }
 
 // NewTokenExchanger creates an exchanger using credential values provided

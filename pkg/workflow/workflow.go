@@ -23,11 +23,11 @@ type SubmitResult struct {
 type SubmitRequest struct {
 	UserID           string
 	Prompt           string
-	Messages         []models.Message // if set, used as transcript instead of wrapping Prompt
-	ContinueFrom     string           // parent session ID; if set, artifacts are inherited
-	Repo             string           // e.g. "github.com/shiblon/agentq"; stored as workspace_repo
-	HumanToken       string           // raw bearer token; stored for delegated agent token exchange
-	Compact          bool             // hint to supervisor to summarize inherited context
+	Messages         []models.Message           // if set, used as transcript instead of wrapping Prompt
+	ContinueFrom     string                     // parent session ID; if set, artifacts are inherited
+	Repo             string                     // e.g. "github.com/shiblon/agentq"; stored as workspace_repo
+	HumanToken       string                     // raw bearer token; stored for delegated agent token exchange
+	Compact          bool                       // hint to supervisor to summarize inherited context
 	ProvenanceIssuer *approval.ProvenanceIssuer // if set, mints a provenance token for this session
 	// SupervisorQueue is the EntroQ queue to enqueue the supervisor task on.
 	// Defaults to "agentq/supervisor/inbox" if empty.

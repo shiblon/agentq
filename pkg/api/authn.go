@@ -41,7 +41,7 @@ func ClaimsFromContext(ctx context.Context) *Claims {
 // JWKSValidator validates JWTs against a JWKS endpoint, with automatic
 // key refresh.
 type JWKSValidator struct {
-	cache *jwk.Cache
+	cache   *jwk.Cache
 	jwksURL string
 	issuer  string
 

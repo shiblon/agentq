@@ -13,14 +13,14 @@ import (
 // sessionSummary is the shape returned by the list endpoint.
 // Artifact content is excluded -- fetch the full session by ID to get it.
 type sessionSummary struct {
-	ID              string         `json:"id"`
-	UserID          string         `json:"user_id"`
-	Prompt          string         `json:"prompt"`
-	ParentSessionID string         `json:"parent_session_id,omitempty"`
-	Status          string         `json:"status"`
-	ArtifactCount   int            `json:"artifact_count"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	ID              string    `json:"id"`
+	UserID          string    `json:"user_id"`
+	Prompt          string    `json:"prompt"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	Status          string    `json:"status"`
+	ArtifactCount   int       `json:"artifact_count"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func summarize(s *models.Session) sessionSummary {

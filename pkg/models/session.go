@@ -54,14 +54,14 @@ func UserReplyQueue(sessionID string) string {
 // Session represents a user-initiated workflow with session context.
 // It tracks artifacts produced, and provides context for routing decisions.
 type Session struct {
-	ID              string     `json:"id"`
-	UserID          string     `json:"user_id"`
-	Prompt          string     `json:"prompt"`
-	ParentSessionID string     `json:"parent_session_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	Status          string     `json:"status"` // pending, in_progress, completed, failed, cancelled, awaiting_review
-	Artifacts       []Artifact `json:"artifacts"`
+	ID              string      `json:"id"`
+	UserID          string      `json:"user_id"`
+	Prompt          string      `json:"prompt"`
+	ParentSessionID string      `json:"parent_session_id,omitempty"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
+	Status          string      `json:"status"` // pending, in_progress, completed, failed, cancelled, awaiting_review
+	Artifacts       []Artifact  `json:"artifacts"`
 	Meta            SessionMeta `json:"metadata"` // JSON key kept as "metadata" for wire compat
 }
 

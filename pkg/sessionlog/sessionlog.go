@@ -37,13 +37,13 @@ const (
 
 // Chunk is a single entry in a session's ordered event log.
 type Chunk struct {
-	Type      ChunkType             `json:"type"`
-	Content   string                `json:"content,omitempty"`  // message text, for message types
-	Agent     string                `json:"agent,omitempty"`    // agent name, for dispatch types
-	ChildID   string                `json:"child_id,omitempty"` // child session ID, for dispatch types
-	Summary   string                `json:"summary,omitempty"`  // result summary, for dispatch_complete (legacy)
-	Result    *models.DispatchResult `json:"result,omitempty"`  // structured result, for dispatch_complete
-	CreatedAt time.Time             `json:"created_at"`
+	Type      ChunkType              `json:"type"`
+	Content   string                 `json:"content,omitempty"`  // message text, for message types
+	Agent     string                 `json:"agent,omitempty"`    // agent name, for dispatch types
+	ChildID   string                 `json:"child_id,omitempty"` // child session ID, for dispatch types
+	Summary   string                 `json:"summary,omitempty"`  // result summary, for dispatch_complete (legacy)
+	Result    *models.DispatchResult `json:"result,omitempty"`   // structured result, for dispatch_complete
+	CreatedAt time.Time              `json:"created_at"`
 }
 
 // pendingEntry is the docstore content for an in-flight dispatch record.

@@ -18,8 +18,8 @@ const (
 
 // DeviceFlowClient initiates and polls an RFC 8628 device authorization flow.
 type DeviceFlowClient struct {
-	issuer   string
-	clientID string
+	issuer     string
+	clientID   string
 	httpClient *http.Client
 }
 
@@ -27,8 +27,8 @@ type DeviceFlowClient struct {
 // client ID. No client secret is needed for device flow public clients.
 func NewDeviceFlowClient(issuer, clientID string) *DeviceFlowClient {
 	return &DeviceFlowClient{
-		issuer:   strings.TrimRight(issuer, "/"),
-		clientID: clientID,
+		issuer:     strings.TrimRight(issuer, "/"),
+		clientID:   clientID,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }

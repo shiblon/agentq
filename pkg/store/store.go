@@ -17,7 +17,6 @@ func SessionURI(sessionID string) string {
 	return "doc:sessions/" + sessionID
 }
 
-
 // Store wraps an entroq client with typed doc operations for sessions and configs.
 type Store struct {
 	eq *entroq.EntroQ

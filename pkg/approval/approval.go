@@ -45,7 +45,7 @@ type Token struct {
 // 32-byte random secret held only by the supervisor. Load it from a file or
 // Vault secret; never embed it in source.
 type Issuer struct {
-	rootKey []byte
+	rootKey  []byte
 	location string // identifies this issuer in the token (informational)
 }
 

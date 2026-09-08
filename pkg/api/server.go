@@ -17,16 +17,16 @@ import (
 
 // Server holds shared dependencies for all API handlers.
 type Server struct {
-	eq           *entroq.EntroQ
-	store        *store.Store
-	configFile   string // path to agents.yaml; reloaded per-request for mutations
-	auth         Authorizer
-	validator    *JWKSValidator // nil means no authn enforcement
-	issuer            string         // OIDC issuer URL, forwarded to the frontend via /api/v1/config
-	oidcClientID      string         // browser PKCE client ID, forwarded to the frontend
-	provenanceIssuer  *approval.ProvenanceIssuer // nil means provenance tokens disabled
-	staticDir    string         // if set, serves static files (web UI) from this directory
-	reviews      *reviewStore
+	eq               *entroq.EntroQ
+	store            *store.Store
+	configFile       string // path to agents.yaml; reloaded per-request for mutations
+	auth             Authorizer
+	validator        *JWKSValidator             // nil means no authn enforcement
+	issuer           string                     // OIDC issuer URL, forwarded to the frontend via /api/v1/config
+	oidcClientID     string                     // browser PKCE client ID, forwarded to the frontend
+	provenanceIssuer *approval.ProvenanceIssuer // nil means provenance tokens disabled
+	staticDir        string                     // if set, serves static files (web UI) from this directory
+	reviews          *reviewStore
 }
 
 // Option configures a Server.
